@@ -793,22 +793,77 @@ CREATE POLICY "classes_manage_staff"
     WITH CHECK (public.can_manage_students());
 
 -- 3. RLS: profiles
+DROP POLICY IF EXISTS "profiles_select_self_or_staff" ON public.profiles;
 CREATE POLICY "profiles_select_self_or_staff"
     ON public.profiles FOR SELECT
     TO authenticated
     USING (id = auth.uid() OR public.is_school_staff());
 
+DROP POLICY IF EXISTS "profiles_insert_self_or_admin" ON public.profiles;
+CREATE POLICY "profiles_insert_self_or_admin"
+    ON public.profiles FOR INSERT
+    TO authenticated
+    WITH CHECK (id = auth.uid() OR public.is_authorized_admin());
+
+DROP POLICY IF EXISTS "profiles_update_self" ON public.profiles;
 CREATE POLICY "profiles_update_self"
     ON public.profiles FOR UPDATE
     TO authenticated
-    USING (id = auth.uid())
-    WITH CHECK (id = auth.uid() AND role = (SELECT p.role FROM public.profiles p WHERE p.id = auth.uid()));
+    USING (id = auth.uid() OR public.is_authorized_admin())
+    WITH CHECK (id = auth.uid() OR public.is_authorized_admin());
 
+DROP POLICY IF EXISTS "profiles_manage_super_admin" ON public.profiles;
 CREATE POLICY "profiles_manage_super_admin"
     ON public.profiles FOR ALL
     TO authenticated
     USING (public.is_authorized_admin())
     WITH CHECK (public.is_authorized_admin());
+
+-- Trigger otomatis untuk menyinkronkan user baru dari auth.users ke public.profiles (mendukung penuh Netlify signUp)
+CREATE OR REPLACE FUNCTION public.fn_handle_new_auth_user_profile()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_role public.app_role_type;
+    v_username TEXT;
+    v_full_name TEXT;
+    v_phone TEXT;
+BEGIN
+    IF NEW.email IS NOT NULL AND NEW.email LIKE '%@auth-internal.smpbhinneka.sch.id' THEN
+        RETURN NEW;
+    END IF;
+
+    v_role := CASE
+        WHEN (NEW.raw_user_meta_data ->> 'role') IN ('super_admin', 'admin', 'operator', 'viewer', 'parent')
+            THEN (NEW.raw_user_meta_data ->> 'role')::public.app_role_type
+        ELSE 'operator'::public.app_role_type
+    END;
+
+    v_username := lower(btrim(COALESCE(NULLIF(NEW.raw_user_meta_data ->> 'username', ''), split_part(NEW.email, '@', 1))));
+    v_full_name := btrim(COALESCE(NULLIF(NEW.raw_user_meta_data ->> 'full_name', ''), split_part(NEW.email, '@', 1)));
+    v_phone := NULLIF(btrim(COALESCE(NEW.raw_user_meta_data ->> 'phone', '')), '');
+
+    INSERT INTO public.profiles (id, email, username, full_name, role, phone, is_active)
+    VALUES (NEW.id, lower(btrim(NEW.email)), v_username, v_full_name, v_role, v_phone, TRUE)
+    ON CONFLICT (id) DO UPDATE
+    SET email = EXCLUDED.email,
+        full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), public.profiles.full_name),
+        role = EXCLUDED.role,
+        updated_at = NOW();
+
+    RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_on_auth_user_created_profile ON auth.users;
+CREATE TRIGGER trg_on_auth_user_created_profile
+AFTER INSERT ON auth.users
+FOR EACH ROW EXECUTE FUNCTION public.fn_handle_new_auth_user_profile();
 
 -- 4. RLS: students
 -- Aturan Ketat:

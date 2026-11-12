@@ -236,6 +236,20 @@ export async function ensureSupabaseSessionReady(): Promise<boolean> {
         return true;
       }
     }
+
+    // Pulihkan dari sipds_auth_session jika belum terpasang di client.auth
+    if (typeof window !== 'undefined') {
+      const storedRaw =
+        window.sessionStorage.getItem('sipds_auth_session') ||
+        window.localStorage.getItem('sipds_auth_session');
+      if (storedRaw) {
+        const stored = JSON.parse(storedRaw) as { token?: string; refresh_token?: string };
+        if (stored?.token && !stored.token.startsWith('parent-dob-session-')) {
+          const restored = await setSupabaseSessionToken(stored.token, stored.refresh_token);
+          if (restored) return true;
+        }
+      }
+    }
   } catch {
     // Ignore
   }

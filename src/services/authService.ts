@@ -165,7 +165,7 @@ export async function loginAdmin(identifier: string, password: string): Promise<
     try {
       let emailToLogin = cleanIdentifier;
 
-      // Jika pengguna memasukkan username (tanpa @), cari email dari tabel profiles, public storage, atau peta username
+      // Jika pengguna memasukkan username (tanpa @), cari email dari tabel profiles, local registry, public storage, atau peta username
       if (!emailToLogin.includes('@')) {
         const { data: profileByUser } = await supabase
           .from('profiles')
@@ -175,7 +175,32 @@ export async function loginAdmin(identifier: string, password: string): Promise<
 
         if (profileByUser?.email) {
           emailToLogin = String(profileByUser.email).trim().toLowerCase();
-        } else if (supabaseUrl) {
+        }
+
+        if (!emailToLogin.includes('@') && typeof window !== 'undefined') {
+          try {
+            const rawReg = window.localStorage.getItem('sipds_admin_accounts_registry');
+            if (rawReg) {
+              const regList = JSON.parse(rawReg) as Array<{
+                username?: string;
+                email?: string;
+                full_name?: string;
+              }>;
+              const matched = regList.find(
+                r =>
+                  String(r.username || '').trim().toLowerCase() === emailToLogin ||
+                  String(r.full_name || '').trim().toLowerCase() === emailToLogin
+              );
+              if (matched?.email) {
+                emailToLogin = String(matched.email).trim().toLowerCase();
+              }
+            }
+          } catch {
+            // Ignore
+          }
+        }
+
+        if (!emailToLogin.includes('@') && supabaseUrl) {
           try {
             const mapRes = await fetch(
               `${supabaseUrl}/storage/v1/object/public/sipds-public/username-map.json`
@@ -217,18 +242,14 @@ export async function loginAdmin(identifier: string, password: string): Promise<
             authData.session.refresh_token
           );
 
-          let { data: profile, error: profileErr } = await supabase
+          let { data: profile } = await supabase
             .from('profiles')
             .select('id, email, username, full_name, role, is_active')
             .eq('id', authData.user.id)
             .maybeSingle();
 
           // Jika user baru saja dibuat di Supabase Authentication -> Users dan belum ada baris di public.profiles
-          if (
-            !profile &&
-            !profileErr &&
-            !emailToLogin.endsWith('@auth-internal.smpbhinneka.sch.id')
-          ) {
+          if (!profile && !emailToLogin.endsWith('@auth-internal.smpbhinneka.sch.id')) {
             const metaRole = String(authData.user.user_metadata?.role || '');
             const assignedRole: AdminRole = ['super_admin', 'admin', 'operator', 'viewer'].includes(
               metaRole
@@ -244,6 +265,7 @@ export async function loginAdmin(identifier: string, password: string): Promise<
             const defaultFullName = String(
               authData.user.user_metadata?.full_name || 'Super Admin (Tata Usaha)'
             ).trim();
+            const isMetaActive = authData.user.user_metadata?.is_active !== false;
 
             const { data: createdProfile } = await supabase
               .from('profiles')
@@ -253,13 +275,59 @@ export async function loginAdmin(identifier: string, password: string): Promise<
                 username: defaultUsername,
                 full_name: defaultFullName,
                 role: assignedRole,
-                is_active: true
+                is_active: isMetaActive
               })
               .select('id, email, username, full_name, role, is_active')
               .maybeSingle();
 
             if (createdProfile) {
               profile = createdProfile;
+            } else {
+              // Fallback jika tabel public.profiles membatasi self-insert karena RLS di Netlify
+              profile = {
+                id: authData.user.id,
+                email: emailToLogin,
+                username: defaultUsername,
+                full_name: defaultFullName,
+                role: assignedRole,
+                is_active: isMetaActive
+              };
+            }
+          }
+
+          // Cek apakah ada pembaruan role/status terbaru pada audit_logs (untuk sinkronisasi di Netlify)
+          if (profile) {
+            try {
+              const { data: overrideLogs } = await supabase
+                .from('audit_logs')
+                .select('action, new_values')
+                .eq('target_id', profile.id)
+                .in('action', ['ADMIN_ACCOUNT_REGISTRY', 'UPDATE_ADMIN_PROFILE'])
+                .order('created_at', { ascending: true });
+
+              for (const log of (overrideLogs || []) as Array<{
+                action?: string;
+                new_values?: Record<string, unknown>;
+              }>) {
+                const vals = log.new_values || {};
+                if (
+                  vals.role &&
+                  ['super_admin', 'admin', 'operator', 'viewer'].includes(String(vals.role))
+                ) {
+                  profile.role = String(vals.role);
+                }
+                if (typeof vals.is_active === 'boolean') {
+                  profile.is_active = vals.is_active;
+                }
+                if (typeof vals.full_name === 'string' && vals.full_name.trim()) {
+                  profile.full_name = vals.full_name.trim();
+                }
+                if (typeof vals.username === 'string' && vals.username.trim()) {
+                  profile.username = vals.username.trim();
+                }
+              }
+            } catch {
+              // Non-fatal
             }
           }
 

@@ -763,7 +763,231 @@ app.post('/api/admin/parents/toggle-status', async (req: Request, res: Response)
   }
 });
 
-// 8. ADMIN: BUAT AKUN ADMIN / OPERATOR / VIEWER BARU (Via Supabase Auth Admin API)
+// Helper untuk menyinkronkan peta username -> email ke public storage agar login username berfungsi di Netlify
+async function syncUsernameMapToPublicStorage(supabaseAdmin: SupabaseClient): Promise<void> {
+  try {
+    const { data: profiles } = await supabaseAdmin
+      .from('profiles')
+      .select('username, email, full_name, role')
+      .in('role', ['super_admin', 'admin', 'operator', 'viewer']);
+
+    const usernameMap: Record<string, string> = {
+      tu002: 'baitulmaal56@gmail.com',
+      'badrus soleh': 'baitulmaal56@gmail.com',
+      tusmpbti: 'tusmpbti@gmail.com',
+      'super admin (tata usaha)': 'tusmpbti@gmail.com',
+      superadmin: 'tusmpbti@gmail.com',
+      super_admin: 'tusmpbti@gmail.com',
+      admin: 'baitulmaal56@gmail.com'
+    };
+
+    for (const p of profiles || []) {
+      const email = String(p.email || '').trim().toLowerCase();
+      if (!email) continue;
+      const uname = String(p.username || '').trim().toLowerCase();
+      const fname = String(p.full_name || '').trim().toLowerCase();
+      if (uname) usernameMap[uname] = email;
+      if (fname) usernameMap[fname] = email;
+    }
+
+    await supabaseAdmin.storage
+      .from('sipds-public')
+      .upload('username-map.json', Buffer.from(JSON.stringify(usernameMap, null, 2)), {
+        contentType: 'application/json',
+        upsert: true
+      });
+  } catch {
+    // Non-fatal
+  }
+}
+
+async function listAllAuthUsers(supabaseAdmin: SupabaseClient) {
+  const allUsers: Array<{
+    id: string;
+    email?: string;
+    email_confirmed_at?: string | null;
+    user_metadata?: Record<string, unknown>;
+  }> = [];
+  let page = 1;
+  const perPage = 1000;
+  while (page <= 10) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
+    if (error || !data?.users || data.users.length === 0) break;
+    allUsers.push(...data.users);
+    if (data.users.length < perPage) break;
+    page++;
+  }
+  return allUsers;
+}
+
+async function syncAllStaffProfilesWithSupabaseAdmin(
+  supabaseAdmin: SupabaseClient
+): Promise<Record<string, unknown>[]> {
+  // 1. Ambil seluruh user di Supabase Auth (semua halaman) dan sinkronkan user staf yang belum masuk ke public.profiles
+  const authUsers = await listAllAuthUsers(supabaseAdmin);
+
+  const { data: existingProfiles } = await supabaseAdmin.from('profiles').select('*');
+
+  const profileById = new Map<string, Record<string, unknown>>();
+  const usedUsernames = new Set<string>();
+  for (const p of existingProfiles || []) {
+    profileById.set(String(p.id), p as Record<string, unknown>);
+    if (p.username) {
+      usedUsernames.add(String(p.username).trim().toLowerCase());
+    }
+  }
+
+  let didSyncAny = false;
+
+  // Pastikan akun admin utama baitulmaal56@gmail.com memiliki role super_admin agar lolos kebijakan RLS profiles_manage_super_admin di Netlify
+  for (const p of existingProfiles || []) {
+    const email = String(p.email || '').trim().toLowerCase();
+    if (email === 'baitulmaal56@gmail.com' && p.role !== 'super_admin') {
+      const { data: upgraded } = await supabaseAdmin
+        .from('profiles')
+        .update({ role: 'super_admin', is_active: true })
+        .eq('id', p.id)
+        .select('*')
+        .maybeSingle();
+      if (upgraded) {
+        profileById.set(String(p.id), upgraded as Record<string, unknown>);
+        didSyncAny = true;
+      }
+    }
+  }
+
+  for (const u of authUsers) {
+    const email = String(u.email || '').trim().toLowerCase();
+    if (!email || email.endsWith('@auth-internal.smpbhinneka.sch.id')) continue;
+
+    const meta = (u.user_metadata || {}) as Record<string, unknown>;
+    const metaRole = String(meta.role || '').trim();
+    if (metaRole === 'parent') continue;
+
+    // Pastikan email_confirmed_at aktif agar user yang dibuat via signUp di Netlify langsung bisa login
+    if (!u.email_confirmed_at) {
+      try {
+        await supabaseAdmin.auth.admin.updateUserById(u.id, { email_confirm: true });
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    const existing = profileById.get(u.id);
+    if (!existing) {
+      const assignedRole = ['super_admin', 'admin', 'operator', 'viewer'].includes(metaRole)
+        ? metaRole
+        : 'operator';
+      const baseUsername = String(meta.username || email.split('@')[0])
+        .trim()
+        .toLowerCase();
+      const cleanUsername = usedUsernames.has(baseUsername)
+        ? `${baseUsername}_${u.id.slice(0, 4)}`
+        : baseUsername;
+      const fullName = String(meta.full_name || email.split('@')[0]).trim();
+      const phone = meta.phone ? String(meta.phone).trim() : null;
+
+      const { data: upserted } = await supabaseAdmin
+        .from('profiles')
+        .upsert({
+          id: u.id,
+          email,
+          username: cleanUsername,
+          full_name: fullName,
+          role: assignedRole,
+          phone,
+          is_active: true
+        })
+        .select('*')
+        .maybeSingle();
+
+      if (upserted) {
+        usedUsernames.add(cleanUsername);
+        profileById.set(u.id, upserted as Record<string, unknown>);
+        didSyncAny = true;
+      }
+    }
+  }
+
+  // Sinkronkan juga perubahan role/status dari audit_logs (ADMIN_ACCOUNT_REGISTRY / UPDATE_ADMIN_PROFILE) jika dibuat dari Netlify
+  try {
+    const { data: regLogs } = await supabaseAdmin
+      .from('audit_logs')
+      .select('action, target_id, new_values, created_at')
+      .in('action', ['ADMIN_ACCOUNT_REGISTRY', 'UPDATE_ADMIN_PROFILE'])
+      .order('created_at', { ascending: true })
+      .limit(200);
+
+    for (const log of (regLogs || []) as Array<{
+      action?: string;
+      target_id?: string;
+      new_values?: Record<string, unknown>;
+    }>) {
+      const vals = log.new_values || {};
+      const targetId = String(vals.id || log.target_id || '').trim();
+      if (!targetId) continue;
+
+      if (log.action === 'UPDATE_ADMIN_PROFILE' && profileById.has(targetId)) {
+        const current = profileById.get(targetId)!;
+        const nextRole =
+          vals.role && ['super_admin', 'admin', 'operator', 'viewer'].includes(String(vals.role))
+            ? String(vals.role)
+            : String(current.role);
+        const nextActive =
+          typeof vals.is_active === 'boolean' ? vals.is_active : current.is_active !== false;
+
+        if (current.role !== nextRole || current.is_active !== nextActive) {
+          const { data: updated } = await supabaseAdmin
+            .from('profiles')
+            .update({ role: nextRole, is_active: nextActive })
+            .eq('id', targetId)
+            .select('*')
+            .maybeSingle();
+          if (updated) {
+            profileById.set(targetId, updated as Record<string, unknown>);
+            didSyncAny = true;
+          }
+        }
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  if (didSyncAny) {
+    await syncUsernameMapToPublicStorage(supabaseAdmin);
+  }
+
+  const { data: finalProfiles, error: finalErr } = await supabaseAdmin
+    .from('profiles')
+    .select('*')
+    .in('role', ['super_admin', 'admin', 'operator', 'viewer'])
+    .order('created_at', { ascending: false });
+
+  if (finalErr) throw finalErr;
+  return (finalProfiles || []) as Record<string, unknown>[];
+}
+
+// 8. ADMIN: DAFTAR, SINKRONISASI, BUAT & UPDATE AKUN STAF (super_admin, admin, operator, viewer)
+app.get('/api/admin/users', async (_req: Request, res: Response) => {
+  const supabaseAdmin = getSupabaseAdminClient();
+  if (!supabaseAdmin) {
+    res.status(503).json({
+      error: 'SUPABASE_SERVICE_ROLE_KEY belum dikonfigurasi pada server.'
+    });
+    return;
+  }
+
+  try {
+    const finalProfiles = await syncAllStaffProfilesWithSupabaseAdmin(supabaseAdmin);
+    res.json({ profiles: finalProfiles });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal mengambil daftar akun admin.'
+    });
+  }
+});
+
 app.post('/api/admin/users/create', async (req: Request, res: Response) => {
   const { email, username, full_name, role, password, phone } = req.body;
 
@@ -796,6 +1020,8 @@ app.post('/api/admin/users/create', async (req: Request, res: Response) => {
       .trim()
       .toLowerCase();
 
+    let userId = '';
+
     const { data: createdAuth, error: createErr } = await supabaseAdmin.auth.admin.createUser({
       email: cleanEmail,
       password: String(password),
@@ -803,21 +1029,59 @@ app.post('/api/admin/users/create', async (req: Request, res: Response) => {
       user_metadata: {
         role: String(role),
         full_name: String(full_name).trim(),
-        username: cleanUsername
+        username: cleanUsername,
+        phone: phone ? String(phone).trim() : null
       }
     });
 
-    if (createErr || !createdAuth.user) {
-      throw createErr || new Error('Gagal membuat user di Supabase Auth.');
+    if (createErr) {
+      // Jika user sudah terdaftar di auth.users (mis. dari percobaan signUp sebelumnya di Netlify),
+      // cari user tersebut di seluruh halaman auth.users dan perbarui password + user_metadata-nya
+      const allUsers = await listAllAuthUsers(supabaseAdmin);
+      const existingAuthUser = allUsers.find(
+        u => String(u.email || '').trim().toLowerCase() === cleanEmail
+      );
+
+      if (!existingAuthUser) {
+        throw createErr;
+      }
+
+      userId = existingAuthUser.id;
+      const { error: updateAuthErr } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+        password: String(password),
+        email_confirm: true,
+        user_metadata: {
+          role: String(role),
+          full_name: String(full_name).trim(),
+          username: cleanUsername,
+          phone: phone ? String(phone).trim() : null
+        }
+      });
+      if (updateAuthErr) throw updateAuthErr;
+    } else if (createdAuth?.user) {
+      userId = createdAuth.user.id;
+    } else {
+      throw new Error('Gagal membuat user di Supabase Auth.');
     }
 
-    const userId = createdAuth.user.id;
+    // Pastikan username unik (jika bentrok dengan profil user lain, tambahkan suffix)
+    const { data: usernameCollision } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .ilike('username', cleanUsername)
+      .neq('id', userId)
+      .maybeSingle();
+
+    const finalUsername = usernameCollision
+      ? `${cleanUsername}_${userId.slice(0, 4)}`
+      : cleanUsername;
+
     const { data: profile, error: profErr } = await supabaseAdmin
       .from('profiles')
       .upsert({
         id: userId,
         email: cleanEmail,
-        username: cleanUsername,
+        username: finalUsername,
         full_name: String(full_name).trim(),
         role: String(role),
         phone: phone ? String(phone).trim() : null,
@@ -828,6 +1092,8 @@ app.post('/api/admin/users/create', async (req: Request, res: Response) => {
 
     if (profErr) throw profErr;
 
+    await syncUsernameMapToPublicStorage(supabaseAdmin);
+
     res.json({
       success: true,
       message: `Akun staf ${full_name} (${role}) berhasil dibuat.`,
@@ -836,6 +1102,78 @@ app.post('/api/admin/users/create', async (req: Request, res: Response) => {
   } catch (err: unknown) {
     res.status(500).json({
       error: err instanceof Error ? err.message : 'Gagal membuat akun admin.'
+    });
+  }
+});
+
+app.post('/api/admin/users/update', async (req: Request, res: Response) => {
+  const { targetId, updates } = req.body as {
+    targetId?: string;
+    updates?: { role?: string; is_active?: boolean; full_name?: string; phone?: string };
+  };
+
+  if (!targetId || !updates || typeof updates !== 'object') {
+    res.status(400).json({ error: 'Parameter targetId dan updates wajib diisi.' });
+    return;
+  }
+
+  const supabaseAdmin = getSupabaseAdminClient();
+  if (!supabaseAdmin) {
+    res.status(503).json({
+      error: 'SUPABASE_SERVICE_ROLE_KEY belum dikonfigurasi pada server.'
+    });
+    return;
+  }
+
+  try {
+    const dbUpdates: Record<string, unknown> = {};
+    if (updates.role && ['super_admin', 'admin', 'operator', 'viewer'].includes(updates.role)) {
+      dbUpdates.role = updates.role;
+    }
+    if (typeof updates.is_active === 'boolean') {
+      dbUpdates.is_active = updates.is_active;
+    }
+    if (typeof updates.full_name === 'string' && updates.full_name.trim()) {
+      dbUpdates.full_name = updates.full_name.trim();
+    }
+    if (typeof updates.phone === 'string') {
+      dbUpdates.phone = updates.phone.trim() || null;
+    }
+
+    const { data: updatedProfile, error: updErr } = await supabaseAdmin
+      .from('profiles')
+      .update(dbUpdates)
+      .eq('id', targetId)
+      .select('*')
+      .maybeSingle();
+
+    if (updErr) throw updErr;
+
+    if (updates.role || typeof updates.is_active === 'boolean') {
+      try {
+        const { data: userRes } = await supabaseAdmin.auth.admin.getUserById(targetId);
+        const oldMeta = (userRes?.user?.user_metadata || {}) as Record<string, unknown>;
+        await supabaseAdmin.auth.admin.updateUserById(targetId, {
+          user_metadata: {
+            ...oldMeta,
+            ...(updates.role ? { role: updates.role } : {}),
+            ...(typeof updates.is_active === 'boolean' ? { is_active: updates.is_active } : {})
+          }
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    await syncUsernameMapToPublicStorage(supabaseAdmin);
+
+    res.json({
+      success: true,
+      profile: updatedProfile
+    });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memperbarui akun admin.'
     });
   }
 });
@@ -1901,6 +2239,13 @@ function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[SIPDS SMP BHINNEKA TUNGGAL IKA] Server running on http://0.0.0.0:${PORT}`);
+    const adminClient = getSupabaseAdminClient();
+    if (adminClient) {
+      void syncAllStaffProfilesWithSupabaseAdmin(adminClient).catch(() => {});
+      setInterval(() => {
+        void syncAllStaffProfilesWithSupabaseAdmin(adminClient).catch(() => {});
+      }, 30000);
+    }
   });
 }
 
