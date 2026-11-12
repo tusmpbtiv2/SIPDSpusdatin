@@ -2,11 +2,13 @@ import { AdminUser, ParentUser, AuthUser, AdminRole } from '../types';
 import {
   getSupabase,
   isSupabaseConfigured,
+  supabaseUrl,
   setSupabaseSessionToken,
   clearSupabaseSessionToken,
   registerSupabaseTokenRefreshCallback,
   isJwtTokenValid
 } from './supabase';
+import { hydrateSchoolProfileFromSupabase } from './schoolService';
 import { isBirthDatePasswordMatch, formatDateDMY } from '../utils/formatters';
 
 const SESSION_KEY = 'sipds_auth_session';
@@ -141,6 +143,16 @@ function persistAndNotifySession(session: AuthSession): void {
   notify();
 }
 
+const FALLBACK_USERNAME_TO_EMAIL: Record<string, string> = {
+  tu002: 'baitulmaal56@gmail.com',
+  'badrus soleh': 'baitulmaal56@gmail.com',
+  tusmpbti: 'tusmpbti@gmail.com',
+  'super admin (tata usaha)': 'tusmpbti@gmail.com',
+  superadmin: 'tusmpbti@gmail.com',
+  super_admin: 'tusmpbti@gmail.com',
+  admin: 'baitulmaal56@gmail.com'
+};
+
 export async function loginAdmin(identifier: string, password: string): Promise<AdminUser> {
   const cleanIdentifier = identifier.trim().toLowerCase();
   if (!cleanIdentifier || !password) {
@@ -153,7 +165,7 @@ export async function loginAdmin(identifier: string, password: string): Promise<
     try {
       let emailToLogin = cleanIdentifier;
 
-      // Jika pengguna memasukkan username (tanpa @), coba cari email dari tabel profiles
+      // Jika pengguna memasukkan username (tanpa @), cari email dari tabel profiles, public storage, atau peta username
       if (!emailToLogin.includes('@')) {
         const { data: profileByUser } = await supabase
           .from('profiles')
@@ -163,6 +175,24 @@ export async function loginAdmin(identifier: string, password: string): Promise<
 
         if (profileByUser?.email) {
           emailToLogin = String(profileByUser.email).trim().toLowerCase();
+        } else if (supabaseUrl) {
+          try {
+            const mapRes = await fetch(
+              `${supabaseUrl}/storage/v1/object/public/sipds-public/username-map.json`
+            );
+            if (mapRes.ok) {
+              const mapJson = (await mapRes.json()) as Record<string, string>;
+              if (mapJson && mapJson[emailToLogin]) {
+                emailToLogin = String(mapJson[emailToLogin]).trim().toLowerCase();
+              }
+            }
+          } catch {
+            // Abaikan jika gagal mengambil username-map.json
+          }
+        }
+
+        if (!emailToLogin.includes('@') && FALLBACK_USERNAME_TO_EMAIL[emailToLogin]) {
+          emailToLogin = FALLBACK_USERNAME_TO_EMAIL[emailToLogin];
         }
       }
 
@@ -278,6 +308,8 @@ export async function loginAdmin(identifier: string, password: string): Promise<
               refresh_token: authData.session.refresh_token,
               user: adminUser
             });
+
+            void hydrateSchoolProfileFromSupabase(true);
 
             return adminUser;
           }

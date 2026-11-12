@@ -1,25 +1,30 @@
 import { useState, useEffect } from 'react';
 import { SchoolProfile } from '../types';
 import { SCHOOL_CONFIG } from '../config/school';
-import { getSupabase, isSupabaseConfigured } from './supabase';
+import {
+  getSupabase,
+  isSupabaseConfigured,
+  supabaseUrl,
+  ensureSupabaseSessionReady
+} from './supabase';
 
 const STORAGE_KEY = 'sipds_school_profile';
 const EVENT_NAME = 'sipds_school_profile_updated';
 
 export const DEFAULT_SCHOOL_PROFILE: SchoolProfile = {
   nama_sekolah: 'SMP BHINNEKA TUNGGAL IKA',
-  npsn: '20108921',
+  npsn: '20570884',
   status_akreditasi: 'Akreditasi A (Unggul)',
   bentuk_pendidikan: 'Sekolah Menengah Pertama (SMP)',
   semester_aktif: 'Semester Ganjil',
   tahun_ajaran: '2026/2027',
-  alamat: 'Jl. Bhinneka Karya No. 45, Kebayoran Baru, Jakarta Selatan, DKI Jakarta 12160',
-  telepon: '(021) 7234567',
-  email_resmi: 'tatausaha@smpbhinneka.sch.id',
-  website: 'https://smpbhinneka.sch.id',
-  kepala_sekolah: 'Drs. H. Bambang Sudarmono, M.Pd.',
-  nip_kepala_sekolah: '196807151994031004',
-  logo_url: ''
+  alamat: 'Jl. Pesantren Ngalah Sengonagung Purwosari Pasuruan',
+  telepon: '0821-3623-0907',
+  email_resmi: 'smpbhinnekatunggalika@gmail.com',
+  website: 'www.smpbhinnekatunggalika.sch.id',
+  kepala_sekolah: "Drs. MOH. MAS'UD, S.Pd, M.Pd",
+  nip_kepala_sekolah: '-',
+  logo_url: 'https://cmewsqitnesvnxnswiih.supabase.co/storage/v1/object/public/sipds-public/school-logo.png'
 };
 
 let hasHydratedFromSupabase = false;
@@ -27,6 +32,22 @@ let hydrationPromise: Promise<SchoolProfile> | null = null;
 
 function syncSchoolConfigGlobal(profile: SchoolProfile) {
   Object.assign(SCHOOL_CONFIG, profile);
+}
+
+function sanitizeLegacyPlaceholderProfile(raw: Partial<SchoolProfile>): Partial<SchoolProfile> {
+  const cleaned = { ...raw };
+  // Jika localStorage browser lama masih menyimpan data contoh default Jakarta, gantikan dengan data resmi sekolah
+  if (cleaned.npsn === '20108921') delete cleaned.npsn;
+  if (cleaned.alamat && cleaned.alamat.includes('Kebayoran Baru')) delete cleaned.alamat;
+  if (cleaned.telepon === '(021) 7234567') delete cleaned.telepon;
+  if (cleaned.email_resmi === 'tatausaha@smpbhinneka.sch.id') delete cleaned.email_resmi;
+  if (cleaned.website === 'https://smpbhinneka.sch.id') delete cleaned.website;
+  if (cleaned.kepala_sekolah && cleaned.kepala_sekolah.includes('Bambang Sudarmono')) {
+    delete cleaned.kepala_sekolah;
+  }
+  if (cleaned.nip_kepala_sekolah === '196807151994031004') delete cleaned.nip_kepala_sekolah;
+  if (!cleaned.logo_url) delete cleaned.logo_url;
+  return cleaned;
 }
 
 export function getSchoolProfile(): SchoolProfile {
@@ -37,7 +58,7 @@ export function getSchoolProfile(): SchoolProfile {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw);
+      const parsed = sanitizeLegacyPlaceholderProfile(JSON.parse(raw));
       const merged: SchoolProfile = {
         ...DEFAULT_SCHOOL_PROFILE,
         ...parsed
@@ -53,41 +74,66 @@ export function getSchoolProfile(): SchoolProfile {
   return { ...DEFAULT_SCHOOL_PROFILE };
 }
 
-async function persistSchoolProfileToSupabase(profile: SchoolProfile): Promise<void> {
-  if (!isSupabaseConfigured) return;
-  const supabase = getSupabase();
-  if (!supabase) return;
+export async function persistSchoolProfileToSupabase(profile: SchoolProfile): Promise<boolean> {
+  let savedRemote = false;
 
+  // 1. Simpan melalui endpoint backend jika tersedia (otomatis memperbarui public storage & audit_logs)
   try {
-    const serialized = JSON.stringify(profile);
-    const { error } = await supabase.from('audit_logs').insert([
-      {
-        actor_name: 'Admin Sekolah',
-        actor_role: 'super_admin',
-        actor_type: 'admin',
-        action: 'SCHOOL_PROFILE_CONFIG',
-        target_table: 'school_profile',
-        new_values: profile as unknown as Record<string, unknown>,
-        details: serialized
-      }
-    ]);
-
-    if (error) {
-      // Fallback if new_values column does not exist in older audit_logs schema
-      await supabase.from('audit_logs').insert([
-        {
-          actor_name: 'Admin Sekolah',
-          actor_role: 'super_admin',
-          actor_type: 'admin',
-          action: 'SCHOOL_PROFILE_CONFIG',
-          target_table: 'school_profile',
-          details: serialized
-        }
-      ]);
+    const res = await fetch('/api/school-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile })
+    });
+    const text = await res.text();
+    if (res.ok && text && !text.trim().startsWith('<')) {
+      savedRemote = true;
     }
-  } catch (err) {
-    console.error('Failed to persist school profile to Supabase:', err);
+  } catch {
+    // Abaikan jika di static host (Netlify)
   }
+
+  // 2. Simpan langsung ke Supabase (mendukung penuh Netlify static hosting)
+  if (isSupabaseConfigured) {
+    await ensureSupabaseSessionReady();
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const serialized = JSON.stringify(profile);
+        const { error } = await supabase.from('audit_logs').insert([
+          {
+            actor_name: 'Admin Sekolah',
+            actor_role: 'super_admin',
+            actor_type: 'admin',
+            action: 'SCHOOL_PROFILE_CONFIG',
+            target_table: 'school_profile',
+            new_values: profile as unknown as Record<string, unknown>,
+            details: serialized
+          }
+        ]);
+
+        if (!error) {
+          savedRemote = true;
+        } else {
+          // Fallback jika kolom new_values tidak tersedia
+          const { error: fallbackErr } = await supabase.from('audit_logs').insert([
+            {
+              actor_name: 'Admin Sekolah',
+              actor_role: 'super_admin',
+              actor_type: 'admin',
+              action: 'SCHOOL_PROFILE_CONFIG',
+              target_table: 'school_profile',
+              details: serialized
+            }
+          ]);
+          if (!fallbackErr) savedRemote = true;
+        }
+      } catch (err) {
+        console.error('Failed to persist school profile to Supabase:', err);
+      }
+    }
+  }
+
+  return savedRemote;
 }
 
 export async function hydrateSchoolProfileFromSupabase(force = false): Promise<SchoolProfile> {
@@ -99,11 +145,37 @@ export async function hydrateSchoolProfileFromSupabase(force = false): Promise<S
     const supabase = getSupabase();
     if (!supabase) return getSchoolProfile();
 
+    const isAuthReady = await ensureSupabaseSessionReady();
     let baseProfile = getSchoolProfile();
     let updatedFromRemote = false;
 
     try {
-      // 1. Load latest saved SCHOOL_PROFILE_CONFIG from Supabase audit_logs
+      // 1. Jika belum login (mis. halaman Login di Netlify), muat dari public storage bucket sipds-public
+      if (supabaseUrl) {
+        try {
+          const pubRes = await fetch(
+            `${supabaseUrl}/storage/v1/object/public/sipds-public/school-profile.json`
+          );
+          if (pubRes.ok) {
+            const pubText = await pubRes.text();
+            if (pubText && !pubText.trim().startsWith('<')) {
+              const pubProfile = sanitizeLegacyPlaceholderProfile(JSON.parse(pubText));
+              if (pubProfile && pubProfile.nama_sekolah) {
+                baseProfile = {
+                  ...DEFAULT_SCHOOL_PROFILE,
+                  ...baseProfile,
+                  ...pubProfile
+                };
+                updatedFromRemote = true;
+              }
+            }
+          }
+        } catch {
+          // Abaikan jika gagal memuat public JSON
+        }
+      }
+
+      // 2. Muat konfigurasi terbaru SCHOOL_PROFILE_CONFIG dari tabel audit_logs (saat sesi autentikasi aktif)
       const { data: configRows } = await supabase
         .from('audit_logs')
         .select('*')
@@ -127,16 +199,17 @@ export async function hydrateSchoolProfileFromSupabase(force = false): Promise<S
         }
 
         if (remoteProfile && remoteProfile.nama_sekolah) {
+          const cleanedRemote = sanitizeLegacyPlaceholderProfile(remoteProfile);
           baseProfile = {
             ...DEFAULT_SCHOOL_PROFILE,
             ...baseProfile,
-            ...remoteProfile
+            ...cleanedRemote
           };
           updatedFromRemote = true;
         }
       }
 
-      // 2. Sync active academic year from academic_years table
+      // 3. Sinkronkan Tahun Ajaran Aktif dari tabel academic_years
       const { data: ayRows } = await supabase
         .from('academic_years')
         .select('*')
@@ -166,7 +239,9 @@ export async function hydrateSchoolProfileFromSupabase(force = false): Promise<S
         }
       }
 
-      hasHydratedFromSupabase = true;
+      if (isAuthReady) {
+        hasHydratedFromSupabase = true;
+      }
 
       if (updatedFromRemote && typeof window !== 'undefined') {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(baseProfile));
@@ -212,6 +287,14 @@ export function saveSchoolProfile(
   return updated;
 }
 
+export async function saveSchoolProfileAsync(
+  updates: Partial<SchoolProfile>
+): Promise<{ profile: SchoolProfile; savedRemote: boolean }> {
+  const updated = saveSchoolProfile(updates, { skipSupabasePersist: true });
+  const savedRemote = await persistSchoolProfileToSupabase(updated);
+  return { profile: updated, savedRemote };
+}
+
 export function resetSchoolProfile(): SchoolProfile {
   if (typeof window !== 'undefined') {
     try {
@@ -245,9 +328,7 @@ export function useSchoolProfile(): {
 
     window.addEventListener(EVENT_NAME, handleUpdate);
 
-    if (!hasHydratedFromSupabase) {
-      void hydrateSchoolProfileFromSupabase();
-    }
+    void hydrateSchoolProfileFromSupabase();
 
     return () => {
       window.removeEventListener(EVENT_NAME, handleUpdate);

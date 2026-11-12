@@ -8,6 +8,8 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  VITE_SUPABASE_URL = "https://cmewsqitnesvnxnswiih.supabase.co"
+  VITE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNtZXdzcWl0bmVzdm54bnN3aWloIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM2NDQ3MTAsImV4cCI6MjEwOTIyMDcxMH0.eZdfdAv9nwkoNOxdBpfaiMh5zAl-auzx57eNv83-_ps"
 
 # SPA Routing Redirects
 [[redirects]]

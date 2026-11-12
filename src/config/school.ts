@@ -2,18 +2,18 @@ import { SchoolProfile, AdminRole } from '../types';
 
 export const SCHOOL_CONFIG: SchoolProfile = {
   nama_sekolah: 'SMP BHINNEKA TUNGGAL IKA',
-  npsn: '20108921',
+  npsn: '20570884',
   status_akreditasi: 'Akreditasi A (Unggul)',
   bentuk_pendidikan: 'Sekolah Menengah Pertama (SMP)',
   semester_aktif: 'Semester Ganjil',
   tahun_ajaran: '2026/2027',
-  alamat: 'Jl. Bhinneka Karya No. 45, Kebayoran Baru, Jakarta Selatan, DKI Jakarta 12160',
-  telepon: '(021) 7234567',
-  email_resmi: 'tatausaha@smpbhinneka.sch.id',
-  website: 'https://smpbhinneka.sch.id',
-  kepala_sekolah: 'Drs. H. Bambang Sudarmono, M.Pd.',
-  nip_kepala_sekolah: '196807151994031004',
-  logo_url: ''
+  alamat: 'Jl. Pesantren Ngalah Sengonagung Purwosari Pasuruan',
+  telepon: '0821-3623-0907',
+  email_resmi: 'smpbhinnekatunggalika@gmail.com',
+  website: 'www.smpbhinnekatunggalika.sch.id',
+  kepala_sekolah: "Drs. MOH. MAS'UD, S.Pd, M.Pd",
+  nip_kepala_sekolah: '-',
+  logo_url: 'https://cmewsqitnesvnxnswiih.supabase.co/storage/v1/object/public/sipds-public/school-logo.png'
 };
 
 export const ADMIN_MENUS = [

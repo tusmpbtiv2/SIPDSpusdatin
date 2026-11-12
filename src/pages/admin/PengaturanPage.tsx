@@ -57,7 +57,11 @@ import {
   Image as ImageIcon,
   Building
 } from 'lucide-react';
-import { useSchoolProfile, saveSchoolProfile, resetSchoolProfile } from '../../services/schoolService';
+import {
+  useSchoolProfile,
+  saveSchoolProfileAsync,
+  resetSchoolProfile
+} from '../../services/schoolService';
 import { SchoolLogo } from '../../components/common/SchoolLogo';
 import { formatDateDMY, formatDateTimeDMY } from '../../utils/formatters';
 
@@ -415,16 +419,18 @@ export const PengaturanPage: React.FC = () => {
     reader.readAsDataURL(file);
   };
 
-  const handleSaveSchoolProfile = (e: React.FormEvent) => {
+  const handleSaveSchoolProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profileForm.nama_sekolah.trim()) {
       notifyError('Validasi Gagal', 'Nama sekolah wajib diisi.');
       return;
     }
-    saveSchoolProfile(profileForm);
+    const { savedRemote } = await saveSchoolProfileAsync(profileForm);
     success(
       'Identitas Sekolah Disimpan',
-      `Identitas dan logo untuk "${profileForm.nama_sekolah}" berhasil diterapkan ke seluruh aplikasi, kop cetak, dan dashboard.`
+      savedRemote
+        ? `Identitas dan logo untuk "${profileForm.nama_sekolah}" berhasil disimpan permanen ke database Supabase dan diterapkan ke seluruh aplikasi.`
+        : `Identitas dan logo untuk "${profileForm.nama_sekolah}" berhasil diterapkan ke seluruh aplikasi, kop cetak, dan dashboard.`
     );
   };
 

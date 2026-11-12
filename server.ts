@@ -1794,6 +1794,87 @@ app.post('/api/class-history/upsert', async (req: Request, res: Response) => {
 });
 
 
+// 16. SIMPAN IDENTITAS & PENGATURAN LEMBAGA KE SUPABASE (audit_logs & storage sipds-public)
+app.post('/api/school-profile', async (req: Request, res: Response) => {
+  const { profile } = req.body as { profile?: Record<string, unknown> };
+  if (!profile || typeof profile !== 'object') {
+    res.status(400).json({ error: 'Payload profil sekolah tidak valid.' });
+    return;
+  }
+
+  const supabaseAdmin = getSupabaseAdminClient();
+  const url = getSupabaseUrl();
+  const anonKey = getSupabaseAnonKey();
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+
+  const client =
+    supabaseAdmin ||
+    (url && anonKey
+      ? createClient(url, anonKey, {
+          auth: { autoRefreshToken: false, persistSession: false },
+          global:
+            bearerToken && !bearerToken.startsWith('parent-dob-session-')
+              ? { headers: { Authorization: `Bearer ${bearerToken}` } }
+              : undefined
+        })
+      : null);
+
+  if (!client) {
+    res.status(503).json({ error: 'Supabase belum dikonfigurasi pada server.' });
+    return;
+  }
+
+  try {
+    const cleanProfile = { ...profile };
+    if (
+      supabaseAdmin &&
+      typeof cleanProfile.logo_url === 'string' &&
+      cleanProfile.logo_url.startsWith('data:image/')
+    ) {
+      const matches = cleanProfile.logo_url.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (matches) {
+        const mimeType = matches[1];
+        const buf = Buffer.from(matches[2], 'base64');
+        await supabaseAdmin.storage
+          .from('sipds-public')
+          .upload('school-logo.png', buf, { contentType: mimeType, upsert: true });
+        cleanProfile.logo_url =
+          supabaseAdmin.storage.from('sipds-public').getPublicUrl('school-logo.png').data.publicUrl +
+          `?t=${Date.now()}`;
+      }
+    }
+
+    if (supabaseAdmin) {
+      await supabaseAdmin.storage
+        .from('sipds-public')
+        .upload('school-profile.json', Buffer.from(JSON.stringify(cleanProfile)), {
+          contentType: 'application/json',
+          upsert: true
+        });
+    }
+
+    const serialized = JSON.stringify(cleanProfile);
+    await client.from('audit_logs').insert([
+      {
+        actor_name: 'Admin Sekolah',
+        actor_role: 'super_admin',
+        actor_type: 'admin',
+        action: 'SCHOOL_PROFILE_CONFIG',
+        target_table: 'school_profile',
+        new_values: cleanProfile,
+        details: serialized
+      }
+    ]);
+
+    res.json({ profile: cleanProfile, saved: true });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan lembaga.'
+    });
+  }
+});
+
 // Setup Vite Dev Middleware or Serve Production Static Assets
 function startServer() {
   if (!isProduction) {

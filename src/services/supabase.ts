@@ -15,9 +15,17 @@ function normalizeSupabaseUrl(rawUrl: string): string {
   return trimmed.replace(/\/(rest|auth|storage|functions)\/v1.*$/i, '');
 }
 
+const DEFAULT_PUBLIC_SUPABASE_URL = 'https://cmewsqitnesvnxnswiih.supabase.co';
+const DEFAULT_PUBLIC_SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNtZXdzcWl0bmVzdm54bnN3aWloIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM2NDQ3MTAsImV4cCI6MjEwOTIyMDcxMH0.eZdfdAv9nwkoNOxdBpfaiMh5zAl-auzx57eNv83-_ps';
+
 const envObj = (import.meta as unknown as { env?: Record<string, string> })?.env || {};
-export const supabaseUrl = normalizeSupabaseUrl(envObj.VITE_SUPABASE_URL || '');
-export const supabaseAnonKey = (envObj.VITE_SUPABASE_ANON_KEY || '').trim();
+export const supabaseUrl = normalizeSupabaseUrl(
+  envObj.VITE_SUPABASE_URL || DEFAULT_PUBLIC_SUPABASE_URL
+);
+export const supabaseAnonKey = (
+  envObj.VITE_SUPABASE_ANON_KEY || DEFAULT_PUBLIC_SUPABASE_ANON_KEY
+).trim();
 
 export const isSupabaseConfigured = Boolean(
   supabaseUrl &&
