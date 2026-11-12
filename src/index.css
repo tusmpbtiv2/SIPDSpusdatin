@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+    /* SIPDS Modern Premium Education Management Design Tokens */
+    --sipds-navy: #101D35;
+    --sipds-navy-light: #172847;
+    --sipds-navy-border: #1E3256;
+    --sipds-primary: #315FEA;
+    --sipds-primary-hover: #254EDB;
+    --sipds-primary-soft: #EEF3FF;
+    --sipds-indigo: #6366F1;
+    --sipds-indigo-soft: #EEF2FF;
+    --sipds-bg: #F5F7FB;
+    --sipds-surface: #FFFFFF;
+    --sipds-border: #E2E8F0;
+    --sipds-text-primary: #0F172A;
+    --sipds-text-secondary: #475569;
+    --sipds-text-muted: #64748B;
+
+    /* Semantic Status Colors */
+    --sipds-success: #10B981;
+    --sipds-success-soft: #ECFDF5;
+    --sipds-warning: #F59E0B;
+    --sipds-warning-soft: #FFFBEB;
+    --sipds-danger: #EF4444;
+    --sipds-danger-soft: #FEF2F2;
+
+    /* Radius & Shadows */
+    --sipds-radius-card: 16px;
+    --sipds-radius-control: 12px;
+    --sipds-shadow-card: 0 1px 3px 0 rgba(16, 29, 53, 0.04), 0 1px 2px -1px rgba(16, 29, 53, 0.04);
+    --sipds-shadow-hover: 0 10px 24px -6px rgba(16, 29, 53, 0.07), 0 4px 10px -4px rgba(16, 29, 53, 0.04);
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    color: var(--sipds-text-primary);
+    background-color: var(--sipds-bg);
+    line-height: 1.5;
+  }
+}
+
+/* Reusable Design System Utility Classes */
+.sipds-card {
+  background-color: var(--sipds-surface);
+  border: 1px solid var(--sipds-border);
+  border-radius: var(--sipds-radius-card);
+  box-shadow: var(--sipds-shadow-card);
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1), border-color 160ms ease;
+}
+
+.sipds-card-interactive:hover {
+  box-shadow: var(--sipds-shadow-hover);
+  border-color: #CBD5E1;
+}
+
+/* Custom scrollbar for data tables and sidebar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+

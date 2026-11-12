@@ -1,0 +1,6 @@
+{
+  "name": "SIPDS - SMP Bhinneka Tunggal Ika",
+  "description": "Sistem Informasi Pengelolaan Data Siswa (SIPDS) SMP Bhinneka Tunggal Ika dengan portal administrasi RBAC dan portal orang tua berbasis NISN.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
