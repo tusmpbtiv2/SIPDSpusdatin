@@ -27,6 +27,7 @@ export const ADMIN_MENUS = [
   { id: 'mutasi-masuk', label: 'Mutasi Masuk', icon: 'UserPlus', allowedRoles: ['super_admin', 'admin', 'operator', 'viewer'] },
   { id: 'mutasi-keluar', label: 'Mutasi Keluar', icon: 'UserMinus', allowedRoles: ['super_admin', 'admin', 'operator', 'viewer'] },
   { id: 'arsip-alumni', label: 'Arsip Alumni', icon: 'GraduationCap', allowedRoles: ['super_admin', 'admin', 'operator', 'viewer'] },
+  { id: 'konfirmasi-data', label: 'Konfirmasi Data Siswa', icon: 'ClipboardCheck', allowedRoles: ['super_admin', 'admin', 'operator', 'viewer'] },
   { id: 'verifikasi-perubahan', label: 'Verifikasi Perubahan', icon: 'CheckSquare', allowedRoles: ['super_admin', 'admin', 'operator'] },
   { id: 'statistik', label: 'Statistik', icon: 'BarChart3', allowedRoles: ['super_admin', 'admin', 'operator', 'viewer'] },
   { id: 'export-excel', label: 'Export Data', icon: 'DownloadCloud', allowedRoles: ['super_admin', 'admin', 'operator', 'viewer'] },
@@ -38,6 +39,7 @@ export const ADMIN_MENUS = [
 
 export const PARENT_MENUS = [
   { id: 'parent-dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
+  { id: 'konfirmasi-data-parent', label: 'Konfirmasi Data', icon: 'ClipboardCheck' },
   { id: 'biodata-anak', label: 'Biodata Anak', icon: 'User' },
   { id: 'perbaiki-biodata', label: 'Perbaiki Biodata', icon: 'Edit3' },
   { id: 'pengajuan-saya', label: 'Pengajuan Saya', icon: 'Clock' },

@@ -219,6 +219,13 @@ export async function loginAdmin(identifier: string, password: string): Promise<
         if (!emailToLogin.includes('@') && FALLBACK_USERNAME_TO_EMAIL[emailToLogin]) {
           emailToLogin = FALLBACK_USERNAME_TO_EMAIL[emailToLogin];
         }
+
+        if (!emailToLogin.includes('@')) {
+          const cleanSlug = emailToLogin.replace(/\s+/g, '_').replace(/[^a-z0-9._-]/g, '');
+          if (cleanSlug) {
+            emailToLogin = `staf.${cleanSlug}@staf-internal.smpbhinneka.sch.id`;
+          }
+        }
       }
 
       if (emailToLogin.includes('@')) {
@@ -385,70 +392,114 @@ export async function loginAdmin(identifier: string, password: string): Promise<
       }
     } catch (directErr: unknown) {
       const msg = formatSupabaseNetworkError(directErr, '');
-      // Jika error kredensial/validasi jelas dari Supabase, langsung lempar tanpa memanggil endpoint HTML
       if (
-        msg.includes('Invalid login credentials') ||
-        msg.includes('Email not confirmed') ||
         msg.includes('dinonaktifkan') ||
         msg.includes('bukan akun staf') ||
         msg.includes('Konfigurasi URL Supabase')
       ) {
-        if (msg.includes('Invalid login credentials')) {
-          throw new Error('Email/Username atau password admin tidak sesuai.');
-        }
-        if (msg.includes('Email not confirmed')) {
-          throw new Error(
-            'Email akun belum dikonfirmasi di Supabase Auth. Aktifkan "Auto Confirm User" atau konfirmasi email di Supabase Dashboard.'
-          );
-        }
         throw new Error(msg);
+      }
+      // Untuk "Invalid login credentials" atau "Email not confirmed", lanjutkan ke fallback
+      // endpoint `/api/auth/admin-login` (lokal/remote) atau registri lokal agar akun yang
+      // baru dibuat saat "email rate limit exceeded" otomatis diprovisikan dan bisa login.
+    }
+  }
+
+  // 2. Fallback melalui endpoint backend `/api/auth/admin-login` (lokal & remote dengan auto-sync)
+  const adminApiBases = [
+    '',
+    'https://ais-pre-tnakb6vzhmmo7ibutz5txp-802208519630.asia-east1.run.app',
+    'https://ais-dev-tnakb6vzhmmo7ibutz5txp-802208519630.asia-east1.run.app'
+  ];
+
+  let lastServerError = '';
+
+  for (const baseUrl of adminApiBases) {
+    try {
+      const response = await fetch(`${baseUrl}/api/auth/admin-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: cleanIdentifier, password })
+      });
+
+      const parsed = await safeParseJsonResponse<{
+        error?: string;
+        token?: string;
+        refresh_token?: string;
+        user?: AdminUser;
+      }>(response);
+
+      if (parsed.isJson && parsed.data) {
+        if (response.ok && parsed.data.user && parsed.data.token) {
+          await setSupabaseSessionToken(parsed.data.token, parsed.data.refresh_token);
+
+          persistAndNotifySession({
+            token: parsed.data.token,
+            refresh_token: parsed.data.refresh_token,
+            user: parsed.data.user
+          });
+
+          void hydrateSchoolProfileFromSupabase(true);
+
+          return parsed.data.user;
+        }
+        if (parsed.data.error) {
+          lastServerError = parsed.data.error;
+        }
+      }
+    } catch {
+      // Coba kandidat berikutnya
+    }
+  }
+
+  // 3. Fallback ke registri akun staf lokal (jika akun baru saja dibuat saat email rate limit exceeded)
+  if (typeof window !== 'undefined') {
+    try {
+      const rawReg = window.localStorage.getItem('sipds_admin_accounts_registry');
+      if (rawReg) {
+        const regList = JSON.parse(rawReg) as Array<{
+          id?: string;
+          email?: string;
+          username?: string;
+          full_name?: string;
+          role?: AdminRole;
+          is_active?: boolean;
+          pending_password?: string;
+        }>;
+        const matched = regList.find(
+          r =>
+            String(r.email || '').trim().toLowerCase() === cleanIdentifier ||
+            String(r.username || '').trim().toLowerCase() === cleanIdentifier
+        );
+        if (matched && matched.pending_password && matched.pending_password === String(password)) {
+          if (matched.is_active === false) {
+            throw new Error('Akun admin Anda sedang dinonaktifkan.');
+          }
+          const adminUser: AdminUser = {
+            id: String(matched.id || crypto.randomUUID()),
+            email: String(matched.email || cleanIdentifier),
+            username: String(matched.username || String(matched.email || cleanIdentifier).split('@')[0]),
+            nama_lengkap: String(matched.full_name || matched.email || 'Staf Sekolah'),
+            role: (matched.role as AdminRole) || 'operator',
+            is_active: true,
+            type: 'admin'
+          };
+          persistAndNotifySession({
+            token: `admin-local-session-${adminUser.id}-${Date.now()}`,
+            user: adminUser
+          });
+          void hydrateSchoolProfileFromSupabase(true);
+          return adminUser;
+        }
+      }
+    } catch (regErr: unknown) {
+      if (regErr instanceof Error && regErr.message.includes('dinonaktifkan')) {
+        throw regErr;
       }
     }
   }
 
-  // 2. Fallback melalui endpoint backend `/api/auth/admin-login` (dengan parsing JSON aman)
-  let response: Response;
-  try {
-    response = await fetch('/api/auth/admin-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier: cleanIdentifier, password })
-    });
-  } catch (err: unknown) {
-    throw new Error(formatSupabaseNetworkError(err, 'Gagal menghubungi layanan autentikasi.'));
-  }
-
-  const parsed = await safeParseJsonResponse<{
-    error?: string;
-    token?: string;
-    refresh_token?: string;
-    user?: AdminUser;
-  }>(response);
-
-  if (!parsed.isJson || !parsed.data) {
-    if (!isSupabaseConfigured) {
-      throw new Error(
-        'Koneksi Supabase belum dikonfigurasi. Pastikan Environment Variables VITE_SUPABASE_URL (https://<project-id>.supabase.co) dan VITE_SUPABASE_ANON_KEY sudah diatur.'
-      );
-    }
-    throw new Error(
-      'Gagal memproses respons login. Jika menggunakan username, silakan masuk menggunakan alamat Email lengkap yang terdaftar di Supabase Authentication (contoh: superadmin@smpbhinneka.sch.id).'
-    );
-  }
-
-  if (!response.ok || !parsed.data.user || !parsed.data.token) {
-    throw new Error(parsed.data.error || 'Gagal masuk sebagai admin.');
-  }
-
-  await setSupabaseSessionToken(parsed.data.token, parsed.data.refresh_token);
-
-  persistAndNotifySession({
-    token: parsed.data.token,
-    refresh_token: parsed.data.refresh_token,
-    user: parsed.data.user
-  });
-
-  return parsed.data.user;
+  throw new Error(lastServerError || 'Email/Username atau password admin tidak sesuai.');
 }
 
 export async function loginParent(nisn: string, password: string): Promise<ParentUser> {

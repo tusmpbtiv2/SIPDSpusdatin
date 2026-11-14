@@ -1,7 +1,7 @@
 import React from 'react';
 import { Siswa } from '../../types';
 import { useSchoolProfile } from '../../services/schoolService';
-import { formatDateDMY, mapIncomeToRange } from '../../utils/formatters';
+import { formatDateDMY, formatDateLongID, mapIncomeToRange } from '../../utils/formatters';
 import { generateBiodataF4Pdf } from '../../services/pdfService';
 import { SchoolLogo } from './SchoolLogo';
 import { X, Download, Printer, FileText } from 'lucide-react';
@@ -161,7 +161,7 @@ export const PrintBiodataF4Modal: React.FC<PrintBiodataF4ModalProps> = ({
                   label2="Agama"
                   val2={siswa.agama}
                 />
-                <Row2Col label1="Tempat Lahir" val1={siswa.tempat_lahir} label2="Tanggal Lahir" val2={formatDateDMY(siswa.tanggal_lahir)} />
+                <Row2Col label1="Tempat Lahir" val1={siswa.tempat_lahir} label2="Tanggal Lahir" val2={formatDateLongID(siswa.tanggal_lahir)} />
                 <Row2Col label1="Tanggal Masuk" val1={formatDateDMY(siswa.tanggal_masuk)} label2="Angkatan" val2={siswa.angkatan || siswa.tahun_masuk} />
               </div>
 
@@ -221,7 +221,7 @@ export const PrintBiodataF4Modal: React.FC<PrintBiodataF4ModalProps> = ({
                   E. Data Ayah Kandung
                 </div>
                 <Row2Col label1="Nama Ayah" val1={siswa.nama_ayah} label2="NIK Ayah" val2={siswa.nik_ayah} />
-                <Row2Col label1="Tempat Lahir Ayah" val1={siswa.tempat_lahir_ayah} label2="Tanggal Lahir Ayah" val2={formatDateDMY(siswa.tgl_lahir_ayah)} />
+                <Row2Col label1="Tempat Lahir Ayah" val1={siswa.tempat_lahir_ayah} label2="Tanggal Lahir Ayah" val2={formatDateLongID(siswa.tgl_lahir_ayah)} />
                 <Row2Col label1="Pendidikan Ayah" val1={siswa.pendidikan_ayah} label2="Pekerjaan Ayah" val2={siswa.pekerjaan_ayah} />
                 <Row2Col label1="No. WA Ayah" val1={siswa.no_wa_ayah} label2="Penghasilan Ayah" val2={mapIncomeToRange(siswa.penghasilan_ayah)} />
               </div>
@@ -232,7 +232,7 @@ export const PrintBiodataF4Modal: React.FC<PrintBiodataF4ModalProps> = ({
                   F. Data Ibu Kandung
                 </div>
                 <Row2Col label1="Nama Ibu Kandung" val1={siswa.nama_ibu} label2="NIK Ibu" val2={siswa.nik_ibu} />
-                <Row2Col label1="Tempat Lahir Ibu" val1={siswa.tempat_lahir_ibu} label2="Tanggal Lahir Ibu" val2={formatDateDMY(siswa.tgl_lahir_ibu)} />
+                <Row2Col label1="Tempat Lahir Ibu" val1={siswa.tempat_lahir_ibu} label2="Tanggal Lahir Ibu" val2={formatDateLongID(siswa.tgl_lahir_ibu)} />
                 <Row2Col label1="Pendidikan Ibu" val1={siswa.pendidikan_ibu} label2="Pekerjaan Ibu" val2={siswa.pekerjaan_ibu} />
                 <Row2Col label1="No. WA Ibu" val1={siswa.no_wa_ibu} label2="Penghasilan Ibu" val2={mapIncomeToRange(siswa.penghasilan_ibu)} />
               </div>

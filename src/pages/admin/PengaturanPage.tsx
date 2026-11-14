@@ -286,10 +286,16 @@ export const PengaturanPage: React.FC = () => {
   const handleCreateAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const resolvedUsername =
+        adminUsername.trim() ||
+        (adminEmail.includes('@')
+          ? adminEmail.split('@')[0]
+          : adminFullName.trim().toLowerCase().replace(/\s+/g, '_'));
+
       await createAdminAccount(
         {
-          email: adminEmail.trim(),
-          username: adminUsername.trim() || adminEmail.split('@')[0],
+          email: adminRole === 'super_admin' ? adminEmail.trim() : undefined,
+          username: resolvedUsername,
           full_name: adminFullName.trim(),
           role: adminRole,
           password: adminPassword,
@@ -1157,18 +1163,28 @@ export const PengaturanPage: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Email Login *</label>
-                  <input
-                    type="email"
-                    required
-                    value={adminEmail}
-                    onChange={e => setAdminEmail(e.target.value)}
-                    placeholder="staf@smpbhinneka.sch.id"
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg"
-                  />
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Role / Hak Akses *
+                  </label>
+                  <select
+                    value={adminRole}
+                    onChange={e => {
+                      const nextRole = e.target.value as AdminRole;
+                      setAdminRole(nextRole);
+                      if (nextRole !== 'super_admin') {
+                        setAdminEmail('');
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white font-bold text-blue-950"
+                  >
+                    <option value="super_admin">super_admin</option>
+                    <option value="admin">admin</option>
+                    <option value="operator">operator</option>
+                    <option value="viewer">viewer</option>
+                  </select>
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Username *</label>
+                  <label className="block font-semibold text-slate-700 mb-1">Username Login *</label>
                   <input
                     type="text"
                     required
@@ -1183,18 +1199,32 @@ export const PengaturanPage: React.FC = () => {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Role / Hak Akses *
+                    {adminRole === 'super_admin'
+                      ? 'Email Login (Wajib Super Admin) *'
+                      : 'Email Login (Khusus Super Admin)'}
                   </label>
-                  <select
-                    value={adminRole}
-                    onChange={e => setAdminRole(e.target.value as AdminRole)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white font-bold text-blue-950"
-                  >
-                    <option value="super_admin">super_admin</option>
-                    <option value="admin">admin</option>
-                    <option value="operator">operator</option>
-                    <option value="viewer">viewer</option>
-                  </select>
+                  <input
+                    type="email"
+                    required={adminRole === 'super_admin'}
+                    disabled={adminRole !== 'super_admin'}
+                    value={adminRole === 'super_admin' ? adminEmail : ''}
+                    onChange={e => setAdminEmail(e.target.value)}
+                    placeholder={
+                      adminRole === 'super_admin'
+                        ? 'superadmin@smpbhinneka.sch.id'
+                        : 'Cukup Super Admin yang ada emailnya'
+                    }
+                    className={`w-full px-3 py-2 border rounded-lg ${
+                      adminRole === 'super_admin'
+                        ? 'border-slate-300 bg-white text-slate-900'
+                        : 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
+                    }`}
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    {adminRole === 'super_admin'
+                      ? 'Akun Super Admin menggunakan email aktif & username.'
+                      : 'Role selain Super Admin cukup login menggunakan Username & Password.'}
+                  </p>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">No. Telepon</label>
@@ -1268,7 +1298,15 @@ export const PengaturanPage: React.FC = () => {
                           <div className="font-mono font-semibold text-slate-800">
                             {adm.username}
                           </div>
-                          <div className="text-[11px] text-slate-500">{adm.email}</div>
+                          {adm.role === 'super_admin' &&
+                          adm.email &&
+                          !adm.email.endsWith('@staf-internal.smpbhinneka.sch.id') ? (
+                            <div className="text-[11px] text-slate-500">{adm.email}</div>
+                          ) : (
+                            <div className="text-[10px] text-slate-400">
+                              Login menggunakan Username
+                            </div>
+                          )}
                         </td>
                         <td className="py-2.5 px-3">
                           {canManageSystem ? (

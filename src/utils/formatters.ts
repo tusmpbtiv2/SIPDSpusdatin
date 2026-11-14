@@ -16,6 +16,65 @@ export const INCOME_RANGE_OPTIONS = [
 
 export type IncomeRangeOption = typeof INCOME_RANGE_OPTIONS[number];
 
+export const INDONESIAN_MONTH_NAMES = [
+  'Januari',
+  'Februari',
+  'Maret',
+  'April',
+  'Mei',
+  'Juni',
+  'Juli',
+  'Agustus',
+  'September',
+  'Oktober',
+  'November',
+  'Desember'
+] as const;
+
+const INDONESIAN_MONTH_MAP: Record<string, string> = {
+  januari: '01',
+  jan: '01',
+  februari: '02',
+  feb: '02',
+  pebruari: '02',
+  maret: '03',
+  mar: '03',
+  april: '04',
+  apr: '04',
+  mei: '05',
+  may: '05',
+  juni: '06',
+  jun: '06',
+  juli: '07',
+  jul: '07',
+  agustus: '08',
+  agu: '08',
+  ags: '08',
+  aug: '08',
+  september: '09',
+  sep: '09',
+  sept: '09',
+  oktober: '10',
+  okt: '10',
+  oct: '10',
+  november: '11',
+  nov: '11',
+  nopember: '11',
+  desember: '12',
+  des: '12',
+  dec: '12'
+};
+
+export function isDateFieldKey(fieldKey: string): boolean {
+  return (
+    fieldKey === 'tanggal_lahir' ||
+    fieldKey === 'tgl_lahir_ayah' ||
+    fieldKey === 'tgl_lahir_ibu' ||
+    fieldKey === 'tgl_ijazah_sd' ||
+    fieldKey === 'tanggal_masuk'
+  );
+}
+
 /**
  * Format any date string or ISO timestamp into strictly Indonesian dd-mm-yyyy.
  * Handles:
@@ -23,6 +82,7 @@ export type IncomeRangeOption = typeof INCOME_RANGE_OPTIONS[number];
  * - '2012-05-18T14:30:00.000Z' -> '18-05-2012'
  * - '18/05/2012' -> '18-05-2012'
  * - '18-05-2012' -> '18-05-2012'
+ * - '09 Juli 2012' -> '09-07-2012'
  * Returns '-' for empty/null/undefined values.
  */
 export function formatDateDMY(val?: unknown): string {
@@ -52,6 +112,17 @@ export function formatDateDMY(val?: unknown): string {
     return `${day}-${month}-${year}`;
   }
 
+  // Indonesian long date format e.g. '09 Juli 2012' or '9 Juli 2012'
+  const indoMatch = trimmed.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/);
+  if (indoMatch) {
+    const day = indoMatch[1].padStart(2, '0');
+    const monthCode = INDONESIAN_MONTH_MAP[indoMatch[2].toLowerCase()];
+    const year = indoMatch[3];
+    if (monthCode) {
+      return `${day}-${monthCode}-${year}`;
+    }
+  }
+
   // Parse as JS Date
   const d = new Date(trimmed);
   if (!Number.isNaN(d.getTime())) {
@@ -62,6 +133,25 @@ export function formatDateDMY(val?: unknown): string {
   }
 
   return trimmed;
+}
+
+/**
+ * Format any date string into Indonesian long display format: '09 Juli 2012'
+ * Used across Parent Portal display views.
+ */
+export function formatDateLongID(val?: unknown): string {
+  const dmy = formatDateDMY(val);
+  if (!dmy || dmy === '-') return '-';
+
+  const match = dmy.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (!match) return dmy;
+
+  const [, dd, mm, yyyy] = match;
+  const monthIdx = parseInt(mm, 10) - 1;
+  const monthName = INDONESIAN_MONTH_NAMES[monthIdx];
+  if (!monthName) return dmy;
+
+  return `${dd} ${monthName} ${yyyy}`;
 }
 
 /**
@@ -96,12 +186,10 @@ export function toHtmlDateValue(val?: string | null): string {
     return trimmed;
   }
 
-  // DD-MM-YYYY or DD/MM/YYYY
-  const dmyMatch = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  const dmy = formatDateDMY(trimmed);
+  const dmyMatch = dmy.match(/^(\d{2})-(\d{2})-(\d{4})$/);
   if (dmyMatch) {
-    const day = dmyMatch[1].padStart(2, '0');
-    const month = dmyMatch[2].padStart(2, '0');
-    const year = dmyMatch[3];
+    const [, day, month, year] = dmyMatch;
     return `${year}-${month}-${day}`;
   }
 

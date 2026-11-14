@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { PerubahanBiodata, Siswa } from '../../types';
 import { getPerubahanByNisn } from '../../services/dataService';
 import { ZeroPillBadge } from '../../components/common/ZeroPillBadge';
+import { formatDateLongID, isDateFieldKey } from '../../utils/formatters';
 import { CheckCircle2, History } from 'lucide-react';
 
 interface RiwayatPerubahanPageProps {
@@ -93,9 +94,14 @@ export const RiwayatPerubahanPage: React.FC<RiwayatPerubahanPageProps> = ({ stud
                         </span>
                       )}
                     </div>
-                    <div className="font-bold text-slate-900 mt-0.5">{diff.new_value}</div>
+                    <div className="font-bold text-slate-900 mt-0.5">
+                      {isDateFieldKey(key)
+                        ? `${formatDateLongID(diff.new_value)} (${diff.new_value})`
+                        : diff.new_value}
+                    </div>
                     <div className="text-[11px] text-slate-400">
-                      Data sebelumnya: {diff.old_value}
+                      Data sebelumnya:{' '}
+                      {isDateFieldKey(key) ? formatDateLongID(diff.old_value) : diff.old_value}
                     </div>
                     {diff.item_status === 'rejected' && diff.rejection_reason && (
                       <div className="mt-1 px-2 py-1 rounded bg-rose-50 border border-rose-200 text-[10px] text-rose-800">

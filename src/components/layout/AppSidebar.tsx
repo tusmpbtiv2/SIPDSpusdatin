@@ -25,7 +25,8 @@ import {
   GraduationCap,
   Database,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  ClipboardCheck
 } from 'lucide-react';
 
 export interface AppSidebarProps {
@@ -60,7 +61,7 @@ const MENU_GROUPS: { title: string; ids: string[] }[] = [
   },
   {
     title: 'Mutasi & Verifikasi',
-    ids: ['verifikasi-perubahan', 'mutasi-masuk', 'mutasi-keluar']
+    ids: ['konfirmasi-data', 'verifikasi-perubahan', 'mutasi-masuk', 'mutasi-keluar']
   },
   {
     title: 'Data, Akun & Sistem',
@@ -109,6 +110,8 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
         return <Database className="w-4 h-4 shrink-0" />;
       case 'CheckSquare':
         return <CheckSquare className="w-4 h-4 shrink-0" />;
+      case 'ClipboardCheck':
+        return <ClipboardCheck className="w-4 h-4 shrink-0" />;
       case 'UserPlus':
         return <UserPlus className="w-4 h-4 shrink-0" />;
       case 'UserMinus':

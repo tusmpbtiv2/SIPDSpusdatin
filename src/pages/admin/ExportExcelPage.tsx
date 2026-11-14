@@ -3,7 +3,8 @@ import {
   Siswa,
   Mutasi,
   StudentClassHistoryRecord,
-  ExportLogRecord
+  ExportLogRecord,
+  ALL_59_STUDENT_FIELDS
 } from '../../types';
 import {
   getSiswaList,
@@ -30,7 +31,10 @@ import {
   CheckCircle2,
   RotateCcw,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Columns,
+  Layers,
+  Search
 } from 'lucide-react';
 
 type ExportOptionId =
@@ -44,7 +48,43 @@ type ExportOptionId =
   | 'mutasi_keluar'
   | 'full_59_biodata'
   | 'class_history'
-  | 'by_status';
+  | 'by_status'
+  | 'custom_export';
+
+interface SelectableColumnMeta {
+  key: string;
+  label: string;
+  excelHeader: string;
+  sensitive?: boolean;
+}
+
+const ALL_SELECTABLE_COLUMNS: SelectableColumnMeta[] = [
+  { key: 'NO', label: 'Nomor Urut Baris', excelHeader: 'NO' },
+  { key: 'ANGKATAN', label: 'Tahun Angkatan', excelHeader: 'ANGKATAN' },
+  { key: 'TAHUN_LULUS', label: 'Tahun Kelulusan', excelHeader: 'TAHUN LULUS' },
+  ...ALL_59_STUDENT_FIELDS.map(f => ({
+    key: String(f.key),
+    label: f.label,
+    excelHeader: f.excelHeader,
+    sensitive: f.sensitive
+  }))
+];
+
+const DEFAULT_CUSTOM_COLUMNS: string[] = [
+  'NO',
+  'rombel',
+  'kamar',
+  'nis',
+  'nisn',
+  'nama_lengkap',
+  'jenis_kelamin',
+  'tempat_lahir',
+  'tanggal_lahir',
+  'nama_ayah',
+  'penghasilan_ayah',
+  'nama_ibu',
+  'penghasilan_ibu'
+];
 
 const EXPORT_OPTIONS: { id: ExportOptionId; number: number; title: string; desc: string }[] = [
   {
@@ -74,8 +114,8 @@ const EXPORT_OPTIONS: { id: ExportOptionId; number: number; title: string; desc:
   {
     id: 'by_class',
     number: 5,
-    title: 'Siswa Berdasarkan Kelas',
-    desc: 'Mengekspor daftar siswa per rombongan belajar (7A s/d 9O).'
+    title: 'Siswa Berdasarkan Kelas (Bisa > 1 Kelas)',
+    desc: 'Mengekspor daftar siswa untuk 1 atau beberapa kelas sekaligus (7A s/d 9O).'
   },
   {
     id: 'graduated_alumni',
@@ -112,6 +152,12 @@ const EXPORT_OPTIONS: { id: ExportOptionId; number: number; title: string; desc:
     number: 11,
     title: 'Data Siswa Berdasarkan Status Tertentu',
     desc: 'Mengekspor siswa berdasarkan filter status (Aktif, Lulus, Mutasi, Nonaktif).'
+  },
+  {
+    id: 'custom_export',
+    number: 12,
+    title: 'Export Kustom (Pilih Kelas & Kolom Tertentu)',
+    desc: 'Bebas memilih lebih dari 1 kelas dan memilih lebih dari 1 kolom tertentu sesuai kebutuhan.'
   }
 ];
 
@@ -130,9 +176,15 @@ export const ExportExcelPage: React.FC = () => {
   const [tahunPelajaranFilter, setTahunPelajaranFilter] = useState('all');
   const [angkatanFilter, setAngkatanFilter] = useState('all');
   const [kelasFilter, setKelasFilter] = useState('all');
+  const [selectedClasses, setSelectedClasses] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [tahunLulusFilter, setTahunLulusFilter] = useState('all');
   const [excludeSensitive, setExcludeSensitive] = useState(false);
+
+  // Kustom kolom export (bisa pilih > 1 kolom)
+  const [useCustomColumns, setUseCustomColumns] = useState(false);
+  const [selectedColumns, setSelectedColumns] = useState<string[]>(DEFAULT_CUSTOM_COLUMNS);
+  const [columnSearch, setColumnSearch] = useState('');
 
   const loadData = async () => {
     setLoading(true);
@@ -161,6 +213,16 @@ export const ExportExcelPage: React.FC = () => {
     loadData();
   }, []);
 
+  const allAvailableClasses = useMemo(() => {
+    const set = new Set<string>(CLASS_ROSTER);
+    students.forEach(s => {
+      if (s.rombel && s.rombel.trim() && s.rombel !== '-') {
+        set.add(s.rombel.trim());
+      }
+    });
+    return Array.from(set);
+  }, [students]);
+
   const angkatanOptions = useMemo(() => {
     const s = new Set<string>();
     students.forEach(st => {
@@ -180,6 +242,137 @@ export const ExportExcelPage: React.FC = () => {
     return Array.from(s).sort().reverse();
   }, [students]);
 
+  const filteredSelectableColumns = useMemo(() => {
+    const q = columnSearch.trim().toLowerCase();
+    if (!q) return ALL_SELECTABLE_COLUMNS;
+    return ALL_SELECTABLE_COLUMNS.filter(
+      c =>
+        c.excelHeader.toLowerCase().includes(q) ||
+        c.label.toLowerCase().includes(q) ||
+        c.key.toLowerCase().includes(q)
+    );
+  }, [columnSearch]);
+
+  const toggleClassSelection = (cls: string) => {
+    setSelectedClasses(prev => {
+      const next = prev.includes(cls) ? prev.filter(c => c !== cls) : [...prev, cls];
+      if (next.length === 1) {
+        setKelasFilter(next[0]);
+      } else {
+        setKelasFilter('all');
+      }
+      return next;
+    });
+  };
+
+  const selectClassGroup = (prefix?: '7' | '8' | '9' | 'all' | 'clear') => {
+    if (!prefix || prefix === 'clear') {
+      setSelectedClasses([]);
+      setKelasFilter('all');
+      return;
+    }
+    if (prefix === 'all') {
+      setSelectedClasses([...allAvailableClasses]);
+      setKelasFilter('all');
+      return;
+    }
+    const matching = allAvailableClasses.filter(c => c.startsWith(prefix));
+    setSelectedClasses(matching);
+    setKelasFilter(matching.length === 1 ? matching[0] : 'all');
+  };
+
+  const toggleColumnSelection = (colKey: string) => {
+    setSelectedColumns(prev =>
+      prev.includes(colKey) ? prev.filter(k => k !== colKey) : [...prev, colKey]
+    );
+  };
+
+  const applyColumnPreset = (
+    preset: 'all' | 'identitas' | 'orang_tua' | 'alamat' | 'sekolah_asal' | 'clear'
+  ) => {
+    if (preset === 'clear') {
+      setSelectedColumns([]);
+      return;
+    }
+    if (preset === 'all') {
+      setSelectedColumns(ALL_SELECTABLE_COLUMNS.map(c => c.key));
+      return;
+    }
+    if (preset === 'identitas') {
+      setSelectedColumns([
+        'NO',
+        'ANGKATAN',
+        'rombel',
+        'kamar',
+        'nis',
+        'nisn',
+        'nik',
+        'no_kk',
+        'nama_lengkap',
+        'jenis_kelamin',
+        'tempat_lahir',
+        'tanggal_lahir',
+        'status_dalam_keluarga',
+        'anak_ke',
+        'jumlah_saudara'
+      ]);
+      return;
+    }
+    if (preset === 'orang_tua') {
+      setSelectedColumns([
+        'NO',
+        'rombel',
+        'nis',
+        'nisn',
+        'nama_lengkap',
+        'nama_ayah',
+        'pekerjaan_ayah',
+        'penghasilan_ayah',
+        'no_hp_ayah',
+        'nama_ibu',
+        'pekerjaan_ibu',
+        'penghasilan_ibu',
+        'no_hp_ibu',
+        'nama_wali',
+        'pekerjaan_wali',
+        'penghasilan_wali',
+        'no_hp_wali'
+      ]);
+      return;
+    }
+    if (preset === 'alamat') {
+      setSelectedColumns([
+        'NO',
+        'rombel',
+        'nis',
+        'nisn',
+        'nama_lengkap',
+        'alamat_orang_tua',
+        'desa_kelurahan',
+        'kecamatan',
+        'kabupaten_kota',
+        'provinsi',
+        'daerah_asal'
+      ]);
+      return;
+    }
+    if (preset === 'sekolah_asal') {
+      setSelectedColumns([
+        'NO',
+        'rombel',
+        'nis',
+        'nisn',
+        'nama_lengkap',
+        'nama_sekolah_asal',
+        'status_sekolah_asal',
+        'npsn',
+        'alamat_sekolah_asal',
+        'tahun_ijazah',
+        'nomor_ijazah'
+      ]);
+    }
+  };
+
   // Hitung data yang akan diekspor sesuai opsi & filter
   const targetStudents = useMemo(() => {
     return students.filter(s => {
@@ -193,7 +386,13 @@ export const ExportExcelPage: React.FC = () => {
       }
 
       if (angkatanFilter !== 'all' && angk !== angkatanFilter) return false;
-      if (kelasFilter !== 'all' && s.rombel !== kelasFilter) return false;
+
+      if (selectedClasses.length > 0) {
+        if (!selectedClasses.includes(s.rombel)) return false;
+      } else if (kelasFilter !== 'all' && s.rombel !== kelasFilter) {
+        return false;
+      }
+
       if (statusFilter !== 'all' && s.status !== statusFilter) return false;
       if (tahunLulusFilter !== 'all' && (s.tahun_lulus || '') !== tahunLulusFilter) return false;
       if (tahunPelajaranFilter !== 'all') {
@@ -212,19 +411,32 @@ export const ExportExcelPage: React.FC = () => {
     selectedOption,
     angkatanFilter,
     kelasFilter,
+    selectedClasses,
     statusFilter,
     tahunLulusFilter,
     tahunPelajaranFilter
   ]);
 
+  const isCustomColumnActive =
+    (selectedOption === 'custom_export' || useCustomColumns) &&
+    selectedOption !== 'mutasi_masuk' &&
+    selectedOption !== 'mutasi_keluar' &&
+    selectedOption !== 'class_history';
+
   const handleExecuteExport = async () => {
     const optMeta = EXPORT_OPTIONS.find(o => o.id === selectedOption)!;
+    const kelasLabel =
+      selectedClasses.length > 0
+        ? selectedClasses.join(', ')
+        : kelasFilter;
+
     const filterSummary = {
       tahun_pelajaran: tahunPelajaranFilter,
       angkatan: angkatanFilter,
-      kelas: kelasFilter,
+      kelas: kelasLabel,
       status: statusFilter,
-      tahun_kelulusan: tahunLulusFilter
+      tahun_kelulusan: tahunLulusFilter,
+      kolom_kustom: isCustomColumnActive ? `${selectedColumns.length} kolom dipilih` : 'Semua Kolom'
     };
 
     if (selectedOption === 'mutasi_masuk' || selectedOption === 'mutasi_keluar') {
@@ -250,7 +462,8 @@ export const ExportExcelPage: React.FC = () => {
       const rows = historyList
         .filter(h => {
           if (tahunPelajaranFilter !== 'all' && h.tahun_ajaran !== tahunPelajaranFilter) return false;
-          if (kelasFilter !== 'all' && h.kelas !== kelasFilter) return false;
+          if (selectedClasses.length > 0 && !selectedClasses.includes(h.kelas)) return false;
+          if (selectedClasses.length === 0 && kelasFilter !== 'all' && h.kelas !== kelasFilter) return false;
           return true;
         })
         .map(h => {
@@ -285,11 +498,27 @@ export const ExportExcelPage: React.FC = () => {
       return;
     }
 
-    const prefix = `SIPDS_${selectedOption.toUpperCase()}`;
+    if (isCustomColumnActive && selectedColumns.length === 0) {
+      notifyError(
+        'Pilih Minimal 1 Kolom',
+        'Silakan centang minimal 1 kolom pada panel Pilihan Kolom Tertentu sebelum mengunduh Excel.'
+      );
+      return;
+    }
+
+    const classSuffix =
+      selectedClasses.length > 0
+        ? `_KELAS_${selectedClasses.slice(0, 4).join('-')}${selectedClasses.length > 4 ? '_DLL' : ''}`
+        : kelasFilter !== 'all'
+        ? `_KELAS_${kelasFilter}`
+        : '';
+    const prefix = `SIPDS_${selectedOption.toUpperCase()}${classSuffix}`;
+
     exportStudentsToExcel(targetStudents, {
       format: 'xlsx',
       excludeSensitiveFamilyInfo: selectedOption === 'full_59_biodata' ? false : excludeSensitive,
-      fileNamePrefix: prefix
+      fileNamePrefix: prefix,
+      selectedColumns: isCustomColumnActive ? selectedColumns : undefined
     });
 
     await recordExportLog({
@@ -300,7 +529,12 @@ export const ExportExcelPage: React.FC = () => {
       total_records: targetStudents.length,
       file_name: `${prefix}.xlsx`
     });
-    success('Export Selesai', `Berkas Excel ${optMeta.title} (${targetStudents.length} baris) berhasil diunduh.`);
+    success(
+      'Export Selesai',
+      `Berkas Excel ${optMeta.title} (${targetStudents.length} siswa${
+        isCustomColumnActive ? `, ${selectedColumns.length} kolom` : ''
+      }) berhasil diunduh.`
+    );
     await loadData();
   };
 
@@ -308,6 +542,7 @@ export const ExportExcelPage: React.FC = () => {
     setTahunPelajaranFilter('all');
     setAngkatanFilter('all');
     setKelasFilter('all');
+    setSelectedClasses([]);
     setStatusFilter('all');
     setTahunLulusFilter('all');
   };
@@ -356,7 +591,7 @@ export const ExportExcelPage: React.FC = () => {
       <PageTitle
         category="Data, Akun & Sistem"
         title="Export Data Siswa, Alumni, Mutasi, & Riwayat Kelas (.XLSX)"
-        subtitle="Menghasilkan berkas XLSX standar 11 kategori dengan perlindungan format teks nomor identitas (NIS, NISN, NIK, KK, NPSN) tanpa batasan tiga tahun."
+        subtitle="Menghasilkan berkas XLSX standar dengan opsi kustom multi-kelas & multi-kolom serta perlindungan format teks nomor identitas (NIS, NISN, NIK, KK, NPSN)."
         icon={DownloadCloud}
         actions={
           <button
@@ -390,7 +625,7 @@ export const ExportExcelPage: React.FC = () => {
         </div>
       )}
 
-      {/* 11 Pilihan Kategori Export */}
+      {/* 12 Pilihan Kategori Export */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
         {EXPORT_OPTIONS.map(opt => {
           const isSelected = selectedOption === opt.id;
@@ -398,7 +633,12 @@ export const ExportExcelPage: React.FC = () => {
             <button
               key={opt.id}
               type="button"
-              onClick={() => setSelectedOption(opt.id)}
+              onClick={() => {
+                setSelectedOption(opt.id);
+                if (opt.id === 'custom_export') {
+                  setUseCustomColumns(true);
+                }
+              }}
               className={`p-4 rounded-2xl border text-left transition-all cursor-pointer ${
                 isSelected
                   ? 'bg-[#101D35] text-white border-[#101D35] shadow-md'
@@ -420,7 +660,7 @@ export const ExportExcelPage: React.FC = () => {
       </div>
 
       {/* Filter Panel */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-[0_1px_3px_rgba(16,29,53,0.05)] space-y-4">
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-[0_1px_3px_rgba(16,29,53,0.05)] space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-bold text-[#101D35]">
             <Filter className="w-4 h-4 text-[#315FEA]" />
@@ -474,14 +714,31 @@ export const ExportExcelPage: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-[11px] font-bold text-slate-600 mb-1">Kelas</label>
+            <label className="block text-[11px] font-bold text-slate-600 mb-1">
+              Kelas Cepat (Atau Pilih &gt;1 di Bawah)
+            </label>
             <select
-              value={kelasFilter}
-              onChange={e => setKelasFilter(e.target.value)}
+              value={selectedClasses.length > 1 ? 'multi' : kelasFilter}
+              onChange={e => {
+                const val = e.target.value;
+                if (val === 'all') {
+                  setKelasFilter('all');
+                  setSelectedClasses([]);
+                } else if (val !== 'multi') {
+                  setKelasFilter(val);
+                  setSelectedClasses([val]);
+                }
+              }}
               className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs bg-white font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#315FEA]/20 focus:border-[#315FEA]"
             >
               <option value="all">Semua Kelas</option>
-              {CLASS_ROSTER.map(c => (
+              {selectedClasses.length > 1 && (
+                <option value="multi">
+                  {selectedClasses.length} Kelas Dipilih ({selectedClasses.slice(0, 3).join(', ')}
+                  {selectedClasses.length > 3 ? '...' : ''})
+                </option>
+              )}
+              {allAvailableClasses.map(c => (
                 <option key={c} value={c}>
                   Kelas {c}
                 </option>
@@ -526,6 +783,193 @@ export const ExportExcelPage: React.FC = () => {
           </div>
         </div>
 
+        {/* Panel Kustom Kelas Tertentu (Bisa Pilih Lebih dari 1 Kelas) */}
+        <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-[#101D35]">
+              <Layers className="w-4 h-4 text-[#315FEA]" />
+              <span>
+                Pilih Kustom Kelas Tertentu (Bisa Pilih Lebih dari 1 Kelas)
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-[#315FEA]/10 text-[#315FEA] text-[11px] font-mono">
+                {selectedClasses.length === 0
+                  ? 'Semua Kelas'
+                  : `${selectedClasses.length} Kelas Dipilih`}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => selectClassGroup('clear')}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-[11px] font-semibold text-slate-700 cursor-pointer"
+              >
+                Semua Kelas (Reset)
+              </button>
+              <button
+                type="button"
+                onClick={() => selectClassGroup('7')}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-[#315FEA] cursor-pointer"
+              >
+                Semua Kelas 7
+              </button>
+              <button
+                type="button"
+                onClick={() => selectClassGroup('8')}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-[#315FEA] cursor-pointer"
+              >
+                Semua Kelas 8
+              </button>
+              <button
+                type="button"
+                onClick={() => selectClassGroup('9')}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-[#315FEA] cursor-pointer"
+              >
+                Semua Kelas 9
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {allAvailableClasses.map(cls => {
+              const checked = selectedClasses.includes(cls);
+              return (
+                <button
+                  key={cls}
+                  type="button"
+                  onClick={() => toggleClassSelection(cls)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                    checked
+                      ? 'bg-[#315FEA] text-white border-[#315FEA] shadow-xs'
+                      : 'bg-white text-slate-700 border-slate-200 hover:border-[#315FEA]/50'
+                  }`}
+                >
+                  {cls}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Panel Kustom Kolom Tertentu (Bisa Pilih Lebih dari 1 Kolom) */}
+        {selectedOption !== 'mutasi_masuk' &&
+          selectedOption !== 'mutasi_keluar' &&
+          selectedOption !== 'class_history' && (
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="inline-flex items-center gap-2 text-xs font-bold text-[#101D35] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={isCustomColumnActive}
+                    onChange={e => setUseCustomColumns(e.target.checked)}
+                    disabled={selectedOption === 'custom_export'}
+                    className="rounded border-slate-300 text-[#315FEA] focus:ring-[#315FEA]"
+                  />
+                  <Columns className="w-4 h-4 text-[#315FEA]" />
+                  <span>
+                    Pilih Kustom Kolom Tertentu (Bisa Pilih Lebih dari 1 Kolom)
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-[#315FEA]/10 text-[#315FEA] text-[11px] font-mono">
+                    {isCustomColumnActive
+                      ? `${selectedColumns.length} Kolom Dipilih`
+                      : 'Semua Kolom Standar (61 Kolom)'}
+                  </span>
+                </label>
+
+                {isCustomColumnActive && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => applyColumnPreset('all')}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-[#315FEA] cursor-pointer"
+                    >
+                      Pilih Semua Kolom
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyColumnPreset('identitas')}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-slate-700 cursor-pointer"
+                    >
+                      Identitas Utama
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyColumnPreset('orang_tua')}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-slate-700 cursor-pointer"
+                    >
+                      Orang Tua & Penghasilan
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyColumnPreset('alamat')}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-slate-700 cursor-pointer"
+                    >
+                      Alamat & Daerah
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyColumnPreset('sekolah_asal')}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[11px] font-semibold text-slate-700 cursor-pointer"
+                    >
+                      Sekolah Asal & Ijazah
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyColumnPreset('clear')}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-rose-50 border border-slate-200 text-[11px] font-semibold text-rose-600 cursor-pointer"
+                    >
+                      Hapus Pilihan Kolom
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {isCustomColumnActive && (
+                <div className="space-y-3 pt-1">
+                  <div className="relative max-w-md">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={columnSearch}
+                      onChange={e => setColumnSearch(e.target.value)}
+                      placeholder="Cari nama kolom (misal: NISN, Penghasilan, Ayah, Ibu, Kamar)..."
+                      className="w-full pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#315FEA]/20 focus:border-[#315FEA]"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 max-h-64 overflow-y-auto p-1">
+                    {filteredSelectableColumns.map(col => {
+                      const isChecked = selectedColumns.includes(col.key);
+                      return (
+                        <label
+                          key={col.key}
+                          className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs cursor-pointer transition-all ${
+                            isChecked
+                              ? 'bg-[#315FEA]/10 border-[#315FEA] text-[#101D35] font-bold'
+                              : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => toggleColumnSelection(col.key)}
+                            className="rounded border-slate-300 text-[#315FEA] focus:ring-[#315FEA]"
+                          />
+                          <div className="truncate">
+                            <div className="truncate">{col.excelHeader}</div>
+                            <div className="text-[10px] text-slate-500 font-normal truncate">
+                              {col.label}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
         <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100 text-xs">
           <label className="inline-flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
             <input
@@ -537,9 +981,17 @@ export const ExportExcelPage: React.FC = () => {
             <span>Sembunyikan kolom sensitif (NIK, No KK, Penghasilan)</span>
           </label>
 
-          <span className="font-mono font-bold text-[#315FEA] bg-[#315FEA]/10 px-3 py-1 rounded-lg">
-            Siap Diekspor: {targetStudents.length.toLocaleString('id-ID')} Siswa Terfilter
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {selectedClasses.length > 0 && (
+              <span className="font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-lg">
+                Kelas: {selectedClasses.join(', ')}
+              </span>
+            )}
+            <span className="font-mono font-bold text-[#315FEA] bg-[#315FEA]/10 px-3 py-1 rounded-lg">
+              Siap Diekspor: {targetStudents.length.toLocaleString('id-ID')} Siswa Terfilter
+              {isCustomColumnActive ? ` • ${selectedColumns.length} Kolom` : ''}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -570,3 +1022,4 @@ export const ExportExcelPage: React.FC = () => {
     </div>
   );
 };
+

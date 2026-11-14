@@ -7,6 +7,7 @@ import {
 } from '../../services/dataService';
 import { useNotification } from '../../hooks/useNotification';
 import { ZeroPillBadge } from '../../components/common/ZeroPillBadge';
+import { formatDateLongID, isDateFieldKey } from '../../utils/formatters';
 import { ArrowRight, PlusCircle, FileText, Clock, Send, XCircle, Filter } from 'lucide-react';
 
 interface PengajuanSayaPageProps {
@@ -172,13 +173,16 @@ export const PengajuanSayaPage: React.FC<PengajuanSayaPageProps> = ({
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-11 gap-2 items-center">
                       <div className="sm:col-span-5 text-slate-500 line-through break-words">
-                        Lama: {diff.old_value}
+                        Lama: {isDateFieldKey(key) ? formatDateLongID(diff.old_value) : diff.old_value}
                       </div>
                       <div className="sm:col-span-1 flex justify-center text-slate-400">
                         <ArrowRight className="w-3.5 h-3.5" />
                       </div>
                       <div className="sm:col-span-5 font-bold text-emerald-900 break-words">
-                        Baru: {diff.new_value}
+                        Baru:{' '}
+                        {isDateFieldKey(key)
+                          ? `${formatDateLongID(diff.new_value)} (${diff.new_value})`
+                          : diff.new_value}
                       </div>
                     </div>
                     {diff.item_status === 'rejected' && diff.rejection_reason && (

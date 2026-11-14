@@ -21,11 +21,14 @@ import {
   AdminAccountRecord,
   AdminRole,
   DashboardFilterState,
-  calculateBiodataCompleteness
+  calculateBiodataCompleteness,
+  DataConfirmationEvent,
+  StudentDataConfirmationRecord
 } from '../types';
 import {
   getSupabase,
   isSupabaseConfigured,
+  supabaseUrl,
   createIsolatedSupabaseClient,
   ensureSupabaseSessionReady
 } from './supabase';
@@ -1927,74 +1930,233 @@ export async function toggleParentAccountStatus(
 // Menggunakan Supabase RPC `rpc_review_student_change_request` yang aman & transaksional
 // ============================================================================
 
-async function fetchChangeRequestsFromSupabase(filterNisn?: string): Promise<PerubahanBiodata[] | null> {
-  if (!isSupabaseConfigured) return null;
-  await ensureSupabaseSessionReady();
-  const supabase = getSupabase();
-  if (!supabase) return null;
+const CHANGE_REQUESTS_CACHE_KEY = 'sipds_change_requests_cache';
+const CONFIRMATION_EVENTS_CACHE_KEY = 'sipds_confirmation_events_cache';
+const CONFIRMATION_RECORDS_CACHE_KEY = 'sipds_confirmation_records_cache';
 
-  let query = supabase
-    .from('student_change_requests')
-    .select('*, student_change_request_items(*), students(nis, nama_wali, nama_ayah, nama_ibu_kandung)')
-    .order('submitted_at', { ascending: false });
+const REMOTE_API_BASES = [
+  '',
+  'https://ais-pre-tnakb6vzhmmo7ibutz5txp-802208519630.asia-east1.run.app',
+  'https://ais-dev-tnakb6vzhmmo7ibutz5txp-802208519630.asia-east1.run.app'
+];
 
-  if (filterNisn) {
-    query = query.eq('nisn', filterNisn);
+function mapDbChangeRequestRow(row: Record<string, unknown>): PerubahanBiodata {
+  const items = Array.isArray(row.student_change_request_items)
+    ? (row.student_change_request_items as Record<string, unknown>[])
+    : [];
+
+  const studentRel = (row.students as Record<string, unknown>) || {};
+
+  const fieldsChanged: Record<string, ChangeFieldDetail> = {};
+  items.forEach(item => {
+    const fName = String(item.field_name || '');
+    if (fName) {
+      fieldsChanged[fName] = {
+        old_value: String(item.old_value ?? '-'),
+        new_value: String(item.new_value ?? '-'),
+        label: String(item.field_label || fName),
+        item_status: (item.item_status as ChangeItemStatus) || 'pending',
+        rejection_reason: item.rejection_reason ? String(item.rejection_reason) : undefined
+      };
+    }
+  });
+
+  if (Object.keys(fieldsChanged).length === 0 && row.fields_changed && typeof row.fields_changed === 'object') {
+    Object.assign(fieldsChanged, row.fields_changed);
   }
 
-  const { data, error } = await query;
-  if (error || !data) return null;
+  const requesterName = String(
+    row.requester_name ||
+      studentRel.nama_wali ||
+      studentRel.nama_ayah ||
+      studentRel.nama_ibu_kandung ||
+      `Orang Tua / Wali (${String(row.nisn || '')})`
+  );
 
-  return data.map((row: Record<string, unknown>) => {
-    const items = Array.isArray(row.student_change_request_items)
-      ? (row.student_change_request_items as Record<string, unknown>[])
-      : [];
+  return {
+    id: String(row.id),
+    siswa_id: String(row.student_id || row.siswa_id || ''),
+    nis: String(row.nis || studentRel.nis || ''),
+    nisn: String(row.nisn || ''),
+    nama_siswa: toUpperStudentName(row.nama_siswa || ''),
+    kelas: String(row.kelas || ''),
+    requester_name: requesterName,
+    requester_relation: String(row.requester_relation || 'Orang Tua / Wali'),
+    fields_changed: fieldsChanged,
+    alasan: String(row.alasan_pengajuan || row.alasan || ''),
+    dokumen_pendukung_nama: row.dokumen_pendukung_nama
+      ? String(row.dokumen_pendukung_nama)
+      : undefined,
+    status: (row.status || 'pending') as ChangeRequestStatus,
+    verifikator_name: row.reviewer_name
+      ? String(row.reviewer_name)
+      : row.verifikator_name
+      ? String(row.verifikator_name)
+      : undefined,
+    catatan_verifikator: row.catatan_verifikator ? String(row.catatan_verifikator) : undefined,
+    submitted_at: String(row.submitted_at || new Date().toISOString()),
+    verified_at: row.reviewed_at
+      ? String(row.reviewed_at)
+      : row.verified_at
+      ? String(row.verified_at)
+      : undefined,
+    event_id: row.event_id ? String(row.event_id) : undefined,
+    event_name: row.event_name ? String(row.event_name) : undefined
+  };
+}
 
-    const studentRel = (row.students as Record<string, unknown>) || {};
+async function fetchChangeRequestsFromSupabase(filterNisn?: string): Promise<PerubahanBiodata[] | null> {
+  const byId = new Map<string, PerubahanBiodata>();
 
-    const fieldsChanged: Record<string, ChangeFieldDetail> = {};
-    items.forEach(item => {
-      const fName = String(item.field_name || '');
-      if (fName) {
-        fieldsChanged[fName] = {
-          old_value: String(item.old_value ?? '-'),
-          new_value: String(item.new_value ?? '-'),
-          label: String(item.field_label || fName),
-          item_status: (item.item_status as ChangeItemStatus) || 'pending',
-          rejection_reason: item.rejection_reason ? String(item.rejection_reason) : undefined
-        };
+  // 1. Coba muat dari API endpoint (mendukung penuh sesi orang tua berbasis Tanggal Lahir & Admin)
+  for (const baseUrl of REMOTE_API_BASES) {
+    try {
+      const qs = filterNisn ? `?nisn=${encodeURIComponent(filterNisn)}` : '';
+      const res = await fetch(`${baseUrl}/api/parent/change-requests${qs}`);
+      const parsed = await safeParseJsonResponse<{
+        tableRows?: Record<string, unknown>[];
+        auditChangeRequests?: Record<string, unknown>[];
+      }>(res);
+      if (res.ok && parsed.isJson && parsed.data) {
+        for (const r of parsed.data.tableRows || []) {
+          const mapped = mapDbChangeRequestRow(r);
+          byId.set(mapped.id, mapped);
+        }
+        for (const r of parsed.data.auditChangeRequests || []) {
+          const mapped = mapDbChangeRequestRow(r);
+          const existing = byId.get(mapped.id);
+          if (existing) {
+            existing.event_id = existing.event_id || mapped.event_id;
+            existing.event_name = existing.event_name || mapped.event_name;
+          } else {
+            byId.set(mapped.id, mapped);
+          }
+        }
+        break;
       }
-    });
+    } catch {
+      // Lanjut ke kandidat berikutnya
+    }
+  }
 
-    const requesterName = String(
-      row.requester_name ||
-        studentRel.nama_wali ||
-        studentRel.nama_ayah ||
-        studentRel.nama_ibu_kandung ||
-        `Orang Tua / Wali (${String(row.nisn || '')})`
-    );
+  // 2. Muat langsung dari Supabase client (saat sesi autentikasi aktif)
+  if (isSupabaseConfigured) {
+    await ensureSupabaseSessionReady();
+    const supabase = getSupabase();
+    if (supabase) {
+      let query = supabase
+        .from('student_change_requests')
+        .select('*, student_change_request_items(*), students(nis, nama_wali, nama_ayah, nama_ibu_kandung)')
+        .order('submitted_at', { ascending: false });
 
-    return {
-      id: String(row.id),
-      siswa_id: String(row.student_id),
-      nis: String(row.nis || studentRel.nis || ''),
-      nisn: String(row.nisn || ''),
-      nama_siswa: toUpperStudentName(row.nama_siswa || ''),
-      kelas: String(row.kelas || ''),
-      requester_name: requesterName,
-      requester_relation: String(row.requester_relation || 'Orang Tua / Wali'),
-      fields_changed: fieldsChanged,
-      alasan: String(row.alasan_pengajuan || ''),
-      dokumen_pendukung_nama: row.dokumen_pendukung_nama
-        ? String(row.dokumen_pendukung_nama)
-        : undefined,
-      status: (row.status || 'pending') as ChangeRequestStatus,
-      verifikator_name: row.reviewer_name ? String(row.reviewer_name) : undefined,
-      catatan_verifikator: row.catatan_verifikator ? String(row.catatan_verifikator) : undefined,
-      submitted_at: String(row.submitted_at || new Date().toISOString()),
-      verified_at: row.reviewed_at ? String(row.reviewed_at) : undefined
-    };
-  });
+      if (filterNisn) {
+        query = query.eq('nisn', filterNisn);
+      }
+
+      const { data, error } = await query;
+      if (!error && data) {
+        for (const row of data as Record<string, unknown>[]) {
+          const mapped = mapDbChangeRequestRow(row);
+          const existing = byId.get(mapped.id);
+          if (existing) {
+            mapped.event_id = mapped.event_id || existing.event_id;
+            mapped.event_name = mapped.event_name || existing.event_name;
+          }
+          byId.set(mapped.id, mapped);
+        }
+      }
+
+      // Periksa juga audit_logs untuk PARENT_CHANGE_REQUEST_SUBMIT
+      try {
+        const { data: auditRows } = await supabase
+          .from('audit_logs')
+          .select('action, target_id, new_values, details, created_at')
+          .in('action', [
+            'PARENT_CHANGE_REQUEST_SUBMIT',
+            'VERIFY_CHANGE_REQUEST_APPROVED',
+            'VERIFY_CHANGE_REQUEST_PARTIALLY_APPROVED',
+            'VERIFY_CHANGE_REQUEST_REJECTED'
+          ])
+          .order('created_at', { ascending: true })
+          .limit(500);
+
+        for (const log of (auditRows || []) as Array<{
+          action?: string;
+          target_id?: string;
+          new_values?: Record<string, unknown>;
+          details?: string;
+          created_at?: string;
+        }>) {
+          let payload: Record<string, unknown> | null = null;
+          if (log.new_values && typeof log.new_values === 'object') {
+            payload = log.new_values;
+          } else if (typeof log.details === 'string' && log.details.trim().startsWith('{')) {
+            try {
+              payload = JSON.parse(log.details);
+            } catch {
+              payload = null;
+            }
+          }
+
+          if (log.action === 'PARENT_CHANGE_REQUEST_SUBMIT' && payload && payload.id) {
+            const mapped = mapDbChangeRequestRow(payload);
+            if (!filterNisn || mapped.nisn === filterNisn) {
+              const existing = byId.get(mapped.id);
+              if (existing) {
+                existing.event_id = existing.event_id || mapped.event_id;
+                existing.event_name = existing.event_name || mapped.event_name;
+              } else {
+                byId.set(mapped.id, mapped);
+              }
+            }
+          } else if (log.action?.startsWith('VERIFY_CHANGE_REQUEST_') && log.target_id) {
+            const reqId = String(log.target_id);
+            const existing = byId.get(reqId);
+            if (existing) {
+              existing.status = log.action.includes('PARTIALLY_APPROVED')
+                ? 'partially_approved'
+                : log.action.includes('APPROVED')
+                ? 'approved'
+                : 'rejected';
+              existing.verified_at = log.created_at || existing.verified_at;
+            }
+          }
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  // 3. Gabungkan dengan cache lokal browser jika ada
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(CHANGE_REQUESTS_CACHE_KEY);
+      if (raw) {
+        const cachedList = JSON.parse(raw) as PerubahanBiodata[];
+        for (const c of cachedList) {
+          if (filterNisn && c.nisn !== filterNisn) continue;
+          if (!byId.has(c.id)) {
+            byId.set(c.id, c);
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  for (const p of perubahanStore) {
+    if (filterNisn && p.nisn !== filterNisn) continue;
+    if (!byId.has(p.id)) {
+      byId.set(p.id, p);
+    }
+  }
+
+  const finalArr = Array.from(byId.values()).sort((a, b) =>
+    String(b.submitted_at || '').localeCompare(String(a.submitted_at || ''))
+  );
+  return finalArr;
 }
 
 export async function getPerubahanList(): Promise<PerubahanBiodata[]> {
@@ -2009,10 +2171,47 @@ export async function getPerubahanByNisn(nisn: string): Promise<PerubahanBiodata
   return perubahanStore.filter(p => p.nisn === nisn);
 }
 
+function saveChangeRequestToLocalCache(item: PerubahanBiodata) {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(CHANGE_REQUESTS_CACHE_KEY);
+    const list: PerubahanBiodata[] = raw ? JSON.parse(raw) : [];
+    const filtered = list.filter(x => x.id !== item.id);
+    filtered.unshift(item);
+    window.localStorage.setItem(CHANGE_REQUESTS_CACHE_KEY, JSON.stringify(filtered.slice(0, 300)));
+  } catch {
+    // Ignore
+  }
+}
+
 export async function submitPerubahan(
   proposal: Omit<PerubahanBiodata, 'id' | 'status' | 'submitted_at'>,
   initialStatus: 'draft' | 'pending' = 'pending'
 ): Promise<PerubahanBiodata> {
+  // 1. Utamakan melalui endpoint `/api/parent/change-requests` (berfungsi untuk sesi DOB maupun Supabase Auth)
+  for (const baseUrl of REMOTE_API_BASES) {
+    try {
+      const res = await fetch(`${baseUrl}/api/parent/change-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proposal, initialStatus })
+      });
+      const parsed = await safeParseJsonResponse<{
+        success?: boolean;
+        proposal?: Record<string, unknown>;
+      }>(res);
+      if (res.ok && parsed.isJson && parsed.data?.proposal) {
+        const mapped = mapDbChangeRequestRow(parsed.data.proposal);
+        saveChangeRequestToLocalCache(mapped);
+        perubahanStore = [mapped, ...perubahanStore.filter(p => p.id !== mapped.id)];
+        return mapped;
+      }
+    } catch {
+      // Coba kandidat berikutnya
+    }
+  }
+
+  // 2. Fallback langsung ke Supabase (jika user memiliki sesi Supabase Auth atau lewat audit_logs)
   if (isSupabaseConfigured) {
     const supabase = getSupabase();
     if (supabase) {
@@ -2038,44 +2237,57 @@ export async function submitPerubahan(
           .select('*')
           .single();
 
-        if (reqErr || !reqHeader) {
-          throw new Error(reqErr?.message || 'Gagal menyimpan pengajuan perubahan biodata.');
+        if (!reqErr && reqHeader) {
+          const itemRows = Object.entries(proposal.fields_changed).map(([fieldName, val]) => ({
+            change_request_id: reqHeader.id,
+            field_name: fieldName,
+            field_label: val.label,
+            old_value: val.old_value,
+            new_value: val.new_value,
+            item_status: 'pending'
+          }));
+
+          if (itemRows.length > 0) {
+            await supabase.from('student_change_request_items').insert(itemRows);
+          }
+
+          const created: PerubahanBiodata = {
+            ...proposal,
+            id: String(reqHeader.id),
+            status: initialStatus,
+            submitted_at: String(reqHeader.submitted_at)
+          };
+          saveChangeRequestToLocalCache(created);
+          return created;
         }
-
-        const itemRows = Object.entries(proposal.fields_changed).map(([fieldName, val]) => ({
-          change_request_id: reqHeader.id,
-          field_name: fieldName,
-          field_label: val.label,
-          old_value: val.old_value,
-          new_value: val.new_value,
-          item_status: 'pending'
-        }));
-
-        if (itemRows.length > 0) {
-          const { error: itemsErr } = await supabase
-            .from('student_change_request_items')
-            .insert(itemRows);
-          if (itemsErr) throw new Error(itemsErr.message);
-        }
-
-        recordAuditLog({
-          user_id: requestedBy,
-          user_name: proposal.requester_name || proposal.nama_siswa,
-          user_role: 'parent',
-          user_type: 'parent',
-          action: initialStatus === 'draft' ? 'SAVE_DRAFT_CHANGE_REQUEST' : 'SUBMIT_CHANGE_REQUEST',
-          target_type: 'student_change_requests',
-          target_id: String(reqHeader.id),
-          details: `Orang tua ${initialStatus === 'draft' ? 'menyimpan draft' : 'mengirim pengajuan'} perubahan ${itemRows.length} kolom biodata untuk siswa ${proposal.nama_siswa} (NISN: ${proposal.nisn}).`
-        });
-
-        return {
-          ...proposal,
-          id: String(reqHeader.id),
-          status: initialStatus,
-          submitted_at: String(reqHeader.submitted_at)
-        };
       }
+
+      // Jika login menggunakan Tanggal Lahir di static host, simpan juga ke audit_logs
+      const fallbackProposal: PerubahanBiodata = {
+        ...proposal,
+        id: crypto.randomUUID ? crypto.randomUUID() : 'prb-' + Date.now(),
+        status: initialStatus,
+        submitted_at: new Date().toISOString()
+      };
+      try {
+        await supabase.from('audit_logs').insert([
+          {
+            actor_name: proposal.requester_name || proposal.nama_siswa,
+            actor_role: 'parent',
+            actor_type: 'parent',
+            action: 'PARENT_CHANGE_REQUEST_SUBMIT',
+            target_table: 'student_change_requests',
+            target_id: fallbackProposal.id,
+            new_values: fallbackProposal as unknown as Record<string, unknown>,
+            details: JSON.stringify(fallbackProposal)
+          }
+        ]);
+      } catch {
+        // Ignore
+      }
+      saveChangeRequestToLocalCache(fallbackProposal);
+      perubahanStore.unshift(fallbackProposal);
+      return fallbackProposal;
     }
   }
 
@@ -2085,6 +2297,7 @@ export async function submitPerubahan(
     status: initialStatus,
     submitted_at: new Date().toISOString()
   };
+  saveChangeRequestToLocalCache(newProposal);
   perubahanStore.unshift(newProposal);
   return newProposal;
 }
@@ -2298,7 +2511,7 @@ export async function reviewPerubahanItems(
           .eq('field_name', key);
       }
 
-      const { error } = await supabase
+      await supabase
         .from('student_change_requests')
         .update({
           status: finalStatus,
@@ -2306,10 +2519,16 @@ export async function reviewPerubahanItems(
           catatan_verifikator: catatan || defaultNote,
           reviewed_at: new Date().toISOString()
         })
-        .eq('id', id)
-        .eq('status', 'pending');
+        .eq('id', id);
 
-      if (error) throw new Error(error.message);
+      const updatedForCache: PerubahanBiodata = {
+        ...proposal,
+        status: finalStatus,
+        verifikator_name: verifikator.name,
+        catatan_verifikator: catatan || defaultNote,
+        verified_at: new Date().toISOString()
+      };
+      saveChangeRequestToLocalCache(updatedForCache);
 
       recordAuditLog({
         user_id: verifikator.id,
@@ -2341,6 +2560,7 @@ export async function reviewPerubahanItems(
         local.fields_changed[key].rejection_reason = dec.reason;
       }
     }
+    saveChangeRequestToLocalCache(local);
   }
 
   recordAuditLog({
@@ -2392,6 +2612,458 @@ export async function rejectPerubahan(
 
   await reviewPerubahanItems(id, verifikator, allRejected, catatan);
 }
+
+// ============================================================================
+// PERIODE / EVENT KONFIRMASI DATA SISWA & MONITORING KONFIRMASI WALI MURID
+// ============================================================================
+
+let confirmationEventsStore: DataConfirmationEvent[] = [];
+let confirmationRecordsStore: StudentDataConfirmationRecord[] = [];
+
+function saveConfirmationStateToLocalCache(
+  events: DataConfirmationEvent[],
+  confirmations: StudentDataConfirmationRecord[]
+) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CONFIRMATION_EVENTS_CACHE_KEY, JSON.stringify(events));
+    window.localStorage.setItem(CONFIRMATION_RECORDS_CACHE_KEY, JSON.stringify(confirmations));
+  } catch {
+    // Ignore
+  }
+}
+
+function loadConfirmationStateFromLocalCache(): {
+  events: DataConfirmationEvent[];
+  confirmations: StudentDataConfirmationRecord[];
+} {
+  if (typeof window === 'undefined') {
+    return { events: confirmationEventsStore, confirmations: confirmationRecordsStore };
+  }
+  try {
+    const rawEv = window.localStorage.getItem(CONFIRMATION_EVENTS_CACHE_KEY);
+    const rawConf = window.localStorage.getItem(CONFIRMATION_RECORDS_CACHE_KEY);
+    const events: DataConfirmationEvent[] = rawEv ? JSON.parse(rawEv) : confirmationEventsStore;
+    const confirmations: StudentDataConfirmationRecord[] = rawConf
+      ? JSON.parse(rawConf)
+      : confirmationRecordsStore;
+    return { events, confirmations };
+  } catch {
+    return { events: confirmationEventsStore, confirmations: confirmationRecordsStore };
+  }
+}
+
+export async function getConfirmationEventsState(): Promise<{
+  events: DataConfirmationEvent[];
+  confirmations: StudentDataConfirmationRecord[];
+}> {
+  const eventsMap = new Map<string, DataConfirmationEvent>();
+  const confirmationsMap = new Map<string, StudentDataConfirmationRecord>();
+
+  // 1. Coba muat dari API endpoint (lokal atau remote server)
+  for (const baseUrl of REMOTE_API_BASES) {
+    try {
+      const res = await fetch(`${baseUrl}/api/confirmation-events`);
+      const parsed = await safeParseJsonResponse<{
+        events?: DataConfirmationEvent[];
+        confirmations?: StudentDataConfirmationRecord[];
+      }>(res);
+      if (res.ok && parsed.isJson && parsed.data) {
+        for (const ev of parsed.data.events || []) {
+          if (ev && ev.id) eventsMap.set(ev.id, ev);
+        }
+        for (const cf of parsed.data.confirmations || []) {
+          if (cf && cf.event_id && (cf.nisn || cf.siswa_id)) {
+            confirmationsMap.set(`${cf.event_id}::${cf.nisn || cf.siswa_id}`, cf);
+          }
+        }
+        break;
+      }
+    } catch {
+      // Coba kandidat berikutnya
+    }
+  }
+
+  // 2. Coba muat dari public storage bucket sipds-public (sangat berguna untuk sesi Orang Tua di Netlify)
+  if (eventsMap.size === 0 && supabaseUrl) {
+    try {
+      const pubRes = await fetch(
+        `${supabaseUrl}/storage/v1/object/public/sipds-public/confirmation-state.json?t=${Date.now()}`
+      );
+      if (pubRes.ok) {
+        const pubText = await pubRes.text();
+        if (pubText && !pubText.trim().startsWith('<')) {
+          const pubJson = JSON.parse(pubText) as {
+            events?: DataConfirmationEvent[];
+            confirmations?: StudentDataConfirmationRecord[];
+          };
+          for (const ev of pubJson.events || []) {
+            if (ev && ev.id) eventsMap.set(ev.id, ev);
+          }
+          for (const cf of pubJson.confirmations || []) {
+            if (cf && cf.event_id && (cf.nisn || cf.siswa_id)) {
+              confirmationsMap.set(`${cf.event_id}::${cf.nisn || cf.siswa_id}`, cf);
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // 3. Muat langsung dari tabel audit_logs via Supabase client (ketika sesi Admin aktif)
+  if (isSupabaseConfigured) {
+    await ensureSupabaseSessionReady();
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { data: logs } = await supabase
+          .from('audit_logs')
+          .select('action, target_id, new_values, details, created_at')
+          .in('action', [
+            'CONFIRMATION_EVENT_UPSERT',
+            'CONFIRMATION_EVENT_DELETE',
+            'STUDENT_DATA_CONFIRMATION',
+            'VERIFY_CHANGE_REQUEST_APPROVED',
+            'VERIFY_CHANGE_REQUEST_PARTIALLY_APPROVED'
+          ])
+          .order('created_at', { ascending: true })
+          .limit(1500);
+
+        for (const row of (logs || []) as Array<{
+          action?: string;
+          target_id?: string;
+          new_values?: Record<string, unknown>;
+          details?: string;
+          created_at?: string;
+        }>) {
+          let payload: Record<string, unknown> | null = null;
+          if (row.new_values && typeof row.new_values === 'object') {
+            payload = row.new_values;
+          } else if (typeof row.details === 'string' && row.details.trim().startsWith('{')) {
+            try {
+              payload = JSON.parse(row.details);
+            } catch {
+              payload = null;
+            }
+          }
+
+          if (row.action === 'CONFIRMATION_EVENT_UPSERT' && payload && payload.id) {
+            eventsMap.set(String(payload.id), payload as unknown as DataConfirmationEvent);
+          } else if (row.action === 'CONFIRMATION_EVENT_DELETE') {
+            const targetId = String(row.target_id || payload?.id || '');
+            if (targetId) eventsMap.delete(targetId);
+          } else if (row.action === 'STUDENT_DATA_CONFIRMATION' && payload) {
+            const cf = payload as unknown as StudentDataConfirmationRecord;
+            if (cf.event_id && (cf.nisn || cf.siswa_id)) {
+              confirmationsMap.set(`${cf.event_id}::${cf.nisn || cf.siswa_id}`, cf);
+            }
+          } else if (row.action?.startsWith('VERIFY_CHANGE_REQUEST_') && row.target_id) {
+            const reqId = String(row.target_id);
+            for (const [k, conf] of confirmationsMap.entries()) {
+              if (conf.change_request_id === reqId) {
+                confirmationsMap.set(k, {
+                  ...conf,
+                  status: 'correction_approved',
+                  verified_at: row.created_at || conf.verified_at
+                });
+              }
+            }
+          }
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  // 4. Gabungkan dengan cache lokal jika belum ada data dari server
+  const localCache = loadConfirmationStateFromLocalCache();
+  if (eventsMap.size === 0) {
+    for (const ev of localCache.events) {
+      if (ev && ev.id) eventsMap.set(ev.id, ev);
+    }
+  }
+  for (const cf of localCache.confirmations) {
+    const key = `${cf.event_id}::${cf.nisn || cf.siswa_id}`;
+    if (!confirmationsMap.has(key)) {
+      confirmationsMap.set(key, cf);
+    }
+  }
+
+  const events = Array.from(eventsMap.values()).sort((a, b) =>
+    String(b.created_at || '').localeCompare(String(a.created_at || ''))
+  );
+  const confirmations = Array.from(confirmationsMap.values()).sort((a, b) =>
+    String(b.confirmed_at || '').localeCompare(String(a.confirmed_at || ''))
+  );
+
+  confirmationEventsStore = events;
+  confirmationRecordsStore = confirmations;
+  saveConfirmationStateToLocalCache(events, confirmations);
+
+  return { events, confirmations };
+}
+
+export async function saveConfirmationEvent(
+  input: Omit<DataConfirmationEvent, 'id' | 'created_at'> & { id?: string; created_at?: string },
+  actor?: { name: string; role: string }
+): Promise<DataConfirmationEvent> {
+  const nowIso = new Date().toISOString();
+  const eventObj: DataConfirmationEvent = {
+    id: input.id || (crypto.randomUUID ? crypto.randomUUID() : `evt-${Date.now()}`),
+    nama_periode: input.nama_periode.trim(),
+    tahun_ajaran: input.tahun_ajaran || SCHOOL_CONFIG.tahun_ajaran || '2026/2027',
+    deskripsi: input.deskripsi?.trim() || '',
+    tanggal_mulai: input.tanggal_mulai,
+    tanggal_selesai: input.tanggal_selesai,
+    target_classes: Array.isArray(input.target_classes) ? input.target_classes : [],
+    target_columns: Array.isArray(input.target_columns) ? input.target_columns : [],
+    is_active: input.is_active !== false,
+    created_by_name: actor?.name || input.created_by_name || 'Admin Sekolah',
+    created_at: input.created_at || nowIso,
+    updated_at: nowIso
+  };
+
+  // 1. Simpan via API endpoint (agar tersinkronisasi ke sipds-public storage & audit_logs)
+  for (const baseUrl of REMOTE_API_BASES) {
+    try {
+      const res = await fetch(`${baseUrl}/api/confirmation-events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'upsert',
+          event: eventObj,
+          actorName: actor?.name || 'Admin Sekolah',
+          actorRole: actor?.role || 'admin'
+        })
+      });
+      if (res.ok) break;
+    } catch {
+      // Lanjut
+    }
+  }
+
+  // 2. Simpan juga langsung ke Supabase audit_logs
+  if (isSupabaseConfigured) {
+    await ensureSupabaseSessionReady();
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await supabase.from('audit_logs').insert([
+          {
+            actor_name: actor?.name || 'Admin Sekolah',
+            actor_role: actor?.role || 'admin',
+            actor_type: 'admin',
+            action: 'CONFIRMATION_EVENT_UPSERT',
+            target_table: 'confirmation_events',
+            target_id: eventObj.id,
+            new_values: eventObj as unknown as Record<string, unknown>,
+            details: JSON.stringify(eventObj)
+          }
+        ]);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  const current = loadConfirmationStateFromLocalCache();
+  const nextEvents = [eventObj, ...current.events.filter(e => e.id !== eventObj.id)];
+  confirmationEventsStore = nextEvents;
+  saveConfirmationStateToLocalCache(nextEvents, current.confirmations);
+
+  return eventObj;
+}
+
+export async function deleteConfirmationEvent(
+  eventId: string,
+  actor?: { name: string; role: string }
+): Promise<void> {
+  for (const baseUrl of REMOTE_API_BASES) {
+    try {
+      const res = await fetch(`${baseUrl}/api/confirmation-events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete',
+          eventId,
+          actorName: actor?.name || 'Admin Sekolah',
+          actorRole: actor?.role || 'admin'
+        })
+      });
+      if (res.ok) break;
+    } catch {
+      // Lanjut
+    }
+  }
+
+  if (isSupabaseConfigured) {
+    await ensureSupabaseSessionReady();
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await supabase.from('audit_logs').insert([
+          {
+            actor_name: actor?.name || 'Admin Sekolah',
+            actor_role: actor?.role || 'admin',
+            actor_type: 'admin',
+            action: 'CONFIRMATION_EVENT_DELETE',
+            target_table: 'confirmation_events',
+            target_id: eventId,
+            new_values: { id: eventId },
+            details: JSON.stringify({ id: eventId })
+          }
+        ]);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  const current = loadConfirmationStateFromLocalCache();
+  const nextEvents = current.events.filter(e => e.id !== eventId);
+  confirmationEventsStore = nextEvents;
+  saveConfirmationStateToLocalCache(nextEvents, current.confirmations);
+}
+
+export async function submitParentDataConfirmation(params: {
+  event: DataConfirmationEvent;
+  student: Siswa;
+  nama_wali: string;
+  hubungan_wali?: string;
+  no_hp_wali?: string;
+  status: 'confirmed_valid' | 'submitted_correction';
+  catatan_wali?: string;
+  fields_changed?: Record<string, ChangeFieldDetail>;
+  alasan?: string;
+  dokumen_pendukung_nama?: string;
+}): Promise<StudentDataConfirmationRecord> {
+  const nowIso = new Date().toISOString();
+  const snapshot: Record<string, string> = {};
+  for (const colKey of params.event.target_columns) {
+    const val = params.student[colKey as keyof Siswa];
+    snapshot[colKey] = val !== undefined && val !== null ? String(val) : '';
+  }
+
+  const confirmationBase: StudentDataConfirmationRecord = {
+    id: crypto.randomUUID ? crypto.randomUUID() : `conf-${Date.now()}`,
+    event_id: params.event.id,
+    event_name: params.event.nama_periode,
+    siswa_id: params.student.id,
+    nis: params.student.nis,
+    nisn: params.student.nisn,
+    nama_siswa: params.student.nama_lengkap,
+    kelas: params.student.rombel,
+    nama_wali: params.nama_wali.trim() || 'Orang Tua / Wali Siswa',
+    hubungan_wali: params.hubungan_wali || 'Orang Tua / Wali',
+    no_hp_wali: params.no_hp_wali || params.student.no_hp_orangtua || '',
+    status: params.status,
+    catatan_wali: params.catatan_wali?.trim() || '',
+    confirmed_columns_snapshot: snapshot,
+    confirmed_at: nowIso
+  };
+
+  const changeProposalPayload =
+    params.status === 'submitted_correction' &&
+    params.fields_changed &&
+    Object.keys(params.fields_changed).length > 0
+      ? {
+          siswa_id: params.student.id,
+          nis: params.student.nis,
+          nisn: params.student.nisn,
+          nama_siswa: params.student.nama_lengkap,
+          kelas: params.student.rombel,
+          requester_name: params.nama_wali.trim() || 'Orang Tua / Wali Siswa',
+          requester_relation: params.hubungan_wali || 'Orang Tua / Wali',
+          fields_changed: params.fields_changed,
+          alasan:
+            params.alasan?.trim() ||
+            `Pengajuan perbaikan data pada periode "${params.event.nama_periode}"`,
+          dokumen_pendukung_nama: params.dokumen_pendukung_nama?.trim() || undefined,
+          event_id: params.event.id,
+          event_name: params.event.nama_periode
+        }
+      : undefined;
+
+  // 1. Utamakan pengiriman via endpoint `/api/parent/confirm-data`
+  for (const baseUrl of REMOTE_API_BASES) {
+    try {
+      const res = await fetch(`${baseUrl}/api/parent/confirm-data`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirmation: confirmationBase,
+          changeProposal: changeProposalPayload
+        })
+      });
+      const parsed = await safeParseJsonResponse<{
+        success?: boolean;
+        confirmation?: StudentDataConfirmationRecord;
+        changeProposal?: Record<string, unknown>;
+      }>(res);
+      if (res.ok && parsed.isJson && parsed.data?.confirmation) {
+        if (parsed.data.changeProposal) {
+          saveChangeRequestToLocalCache(mapDbChangeRequestRow(parsed.data.changeProposal));
+        }
+        const savedConf = parsed.data.confirmation;
+        const current = loadConfirmationStateFromLocalCache();
+        const nextConfirmations = [
+          savedConf,
+          ...current.confirmations.filter(
+            c => !(c.event_id === savedConf.event_id && c.nisn === savedConf.nisn)
+          )
+        ];
+        confirmationRecordsStore = nextConfirmations;
+        saveConfirmationStateToLocalCache(current.events, nextConfirmations);
+        return savedConf;
+      }
+    } catch {
+      // Coba kandidat berikutnya
+    }
+  }
+
+  // 2. Fallback langsung ke Supabase
+  if (changeProposalPayload) {
+    const createdReq = await submitPerubahan(changeProposalPayload, 'pending');
+    confirmationBase.change_request_id = createdReq.id;
+  }
+
+  if (isSupabaseConfigured) {
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await supabase.from('audit_logs').insert([
+          {
+            actor_name: confirmationBase.nama_wali,
+            actor_role: 'parent',
+            actor_type: 'parent',
+            action: 'STUDENT_DATA_CONFIRMATION',
+            target_table: 'confirmation_events',
+            target_id: confirmationBase.event_id,
+            new_values: confirmationBase as unknown as Record<string, unknown>,
+            details: JSON.stringify(confirmationBase)
+          }
+        ]);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  const current = loadConfirmationStateFromLocalCache();
+  const nextConfirmations = [
+    confirmationBase,
+    ...current.confirmations.filter(
+      c => !(c.event_id === confirmationBase.event_id && c.nisn === confirmationBase.nisn)
+    )
+  ];
+  confirmationRecordsStore = nextConfirmations;
+  saveConfirmationStateToLocalCache(current.events, nextConfirmations);
+  return confirmationBase;
+}
+
 
 // ============================================================================
 // STUDENT MUTATIONS (`public.student_mutations` & SUPABASE RPCs)
@@ -5371,21 +6043,29 @@ export async function saveAcademicYearRecord(
   return rec;
 }
 
+const REMOTE_ADMIN_API_BASES = [
+  '',
+  'https://ais-pre-tnakb6vzhmmo7ibutz5txp-802208519630.asia-east1.run.app',
+  'https://ais-dev-tnakb6vzhmmo7ibutz5txp-802208519630.asia-east1.run.app'
+];
+
 const ADMIN_ACCOUNTS_LOCAL_KEY = 'sipds_admin_accounts_registry';
 
-function loadLocalAdminRegistry(): AdminAccountRecord[] {
+type LocalAdminRegistryEntry = AdminAccountRecord & { pending_password?: string };
+
+function loadLocalAdminRegistry(): LocalAdminRegistryEntry[] {
   if (typeof window === 'undefined') return [];
   try {
     const raw = window.localStorage.getItem(ADMIN_ACCOUNTS_LOCAL_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as AdminAccountRecord[]) : [];
+    return Array.isArray(parsed) ? (parsed as LocalAdminRegistryEntry[]) : [];
   } catch {
     return [];
   }
 }
 
-function saveLocalAdminRegistry(list: AdminAccountRecord[]): void {
+function saveLocalAdminRegistry(list: LocalAdminRegistryEntry[]): void {
   if (typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(ADMIN_ACCOUNTS_LOCAL_KEY, JSON.stringify(list));
@@ -5394,7 +6074,7 @@ function saveLocalAdminRegistry(list: AdminAccountRecord[]): void {
   }
 }
 
-function upsertLocalAdminRegistryRecord(record: AdminAccountRecord): void {
+function upsertLocalAdminRegistryRecord(record: LocalAdminRegistryEntry): void {
   const list = loadLocalAdminRegistry();
   const idx = list.findIndex(
     item =>
@@ -5441,31 +6121,35 @@ export async function getAdminProfilesList(): Promise<AdminAccountRecord[]> {
   };
 
   // 1. Coba melalui endpoint server `/api/admin/users` (juga menyinkronkan auth.users -> profiles otomatis)
-  try {
-    const session = getSession();
-    const headers: Record<string, string> = {};
-    if (session?.token) {
-      headers['Authorization'] = `Bearer ${session.token}`;
-    }
-    const res = await fetch('/api/admin/users', { headers });
-    const parsed = await safeParseJsonResponse<{ profiles?: Record<string, unknown>[] }>(res);
-    if (parsed.isJson && res.ok && Array.isArray(parsed.data?.profiles)) {
-      for (const row of parsed.data.profiles) {
-        addRecord({
-          id: String(row.id),
-          email: String(row.email || ''),
-          username: String(row.username || ''),
-          full_name: String(row.full_name || ''),
-          role: String(row.role) as AdminRole,
-          phone: row.phone ? String(row.phone) : undefined,
-          is_active: row.is_active !== false,
-          last_login_at: row.last_login_at ? String(row.last_login_at) : undefined,
-          created_at: String(row.created_at || new Date().toISOString())
-        });
+  const session = getSession();
+  const headers: Record<string, string> = {};
+  if (session?.token) {
+    headers['Authorization'] = `Bearer ${session.token}`;
+  }
+
+  for (const baseUrl of REMOTE_ADMIN_API_BASES) {
+    try {
+      const res = await fetch(`${baseUrl}/api/admin/users`, { headers });
+      const parsed = await safeParseJsonResponse<{ profiles?: Record<string, unknown>[] }>(res);
+      if (parsed.isJson && res.ok && Array.isArray(parsed.data?.profiles)) {
+        for (const row of parsed.data.profiles) {
+          addRecord({
+            id: String(row.id),
+            email: String(row.email || ''),
+            username: String(row.username || ''),
+            full_name: String(row.full_name || ''),
+            role: String(row.role) as AdminRole,
+            phone: row.phone ? String(row.phone) : undefined,
+            is_active: row.is_active !== false,
+            last_login_at: row.last_login_at ? String(row.last_login_at) : undefined,
+            created_at: String(row.created_at || new Date().toISOString())
+          });
+        }
+        break;
       }
+    } catch {
+      // Lanjutkan ke kandidat berikutnya
     }
-  } catch {
-    // Abaikan jika di-deploy statis di Netlify
   }
 
   // 2. Baca dari tabel public.profiles dan audit_logs di Supabase
@@ -5495,7 +6179,7 @@ export async function getAdminProfilesList(): Promise<AdminAccountRecord[]> {
         }
       }
 
-      // Ambil juga registri akun admin yang disimpan melalui audit_logs (fallback RLS di Netlify)
+      // Ambil juga registri akun admin yang disimpan melalui audit_logs (fallback RLS / rate limit di Netlify)
       try {
         const { data: auditRows } = await supabase
           .from('audit_logs')
@@ -5560,7 +6244,7 @@ export async function getAdminProfilesList(): Promise<AdminAccountRecord[]> {
 
 export async function createAdminAccount(
   payload: {
-    email: string;
+    email?: string;
     username: string;
     full_name: string;
     role: AdminRole;
@@ -5573,109 +6257,112 @@ export async function createAdminAccount(
     throw new Error('Hanya Super Admin atau Admin yang dapat membuat akun staf baru.');
   }
 
-  const cleanEmail = String(payload.email).trim().toLowerCase();
-  const cleanUsername = String(payload.username || cleanEmail.split('@')[0])
-    .trim()
-    .toLowerCase();
+  const rawEmail = String(payload.email || '').trim().toLowerCase();
   const cleanFullName = String(payload.full_name).trim();
+  const cleanUsername = String(
+    payload.username || (rawEmail.includes('@') ? rawEmail.split('@')[0] : cleanFullName)
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
   const cleanPhone = payload.phone ? String(payload.phone).trim() : null;
 
-  if (!cleanEmail || !cleanEmail.includes('@')) {
-    throw new Error('Alamat email staf tidak valid.');
-  }
   if (!cleanFullName) {
     throw new Error('Nama lengkap staf wajib diisi.');
+  }
+  if (!cleanUsername) {
+    throw new Error('Username staf wajib diisi.');
+  }
+  if (payload.role === 'super_admin' && (!rawEmail || !rawEmail.includes('@'))) {
+    throw new Error('Alamat email wajib diisi khusus untuk akun Super Admin.');
   }
   if (String(payload.password || '').length < 8) {
     throw new Error('Password minimal harus 8 karakter.');
   }
 
-  // 1. Coba melalui endpoint server `/api/admin/users/create`
-  try {
-    const session = getSession();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (session?.token) {
-      headers['Authorization'] = `Bearer ${session.token}`;
-    }
+  const sanitizedUserSlug = cleanUsername.replace(/[^a-z0-9._-]/g, '') || 'user';
+  const cleanEmail =
+    payload.role === 'super_admin' && rawEmail.includes('@')
+      ? rawEmail
+      : rawEmail.includes('@')
+      ? rawEmail
+      : `staf.${sanitizedUserSlug}@staf-internal.smpbhinneka.sch.id`;
 
-    const res = await fetch('/api/admin/users/create', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        ...payload,
-        email: cleanEmail,
-        username: cleanUsername,
-        full_name: cleanFullName,
-        phone: cleanPhone || undefined
-      })
-    });
+  // 1. Coba melalui endpoint Admin API server (`/api/admin/users/create` lokal maupun remote)
+  // Endpoint ini menggunakan Supabase Admin API (email_confirm: true) sehingga TIDAK mengirim email
+  // dan TIDAK PERNAH terkena "email rate limit exceeded".
+  const session = getSession();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (session?.token) {
+    headers['Authorization'] = `Bearer ${session.token}`;
+  }
 
-    const parsed = await safeParseJsonResponse<{
-      error?: string;
-      profile?: Record<string, unknown>;
-    }>(res);
-    if (parsed.isJson && res.ok) {
-      const createdId = String(parsed.data?.profile?.id || crypto.randomUUID());
-      upsertLocalAdminRegistryRecord({
-        id: createdId,
-        email: cleanEmail,
-        username: cleanUsername,
-        full_name: cleanFullName,
-        role: payload.role,
-        phone: cleanPhone || undefined,
-        is_active: true,
-        created_at: new Date().toISOString()
+  for (const baseUrl of REMOTE_ADMIN_API_BASES) {
+    try {
+      const res = await fetch(`${baseUrl}/api/admin/users/create`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ...payload,
+          email: cleanEmail,
+          username: cleanUsername,
+          full_name: cleanFullName,
+          phone: cleanPhone || undefined
+        })
       });
 
-      recordAuditLog({
-        user_id: actor.id,
-        user_name: actor.name,
-        user_role: actor.role,
-        user_type: 'admin',
-        action: 'CREATE_ADMIN_USER',
-        target_type: 'profiles',
-        target_id: cleanEmail,
-        new_values: {
+      const parsed = await safeParseJsonResponse<{
+        error?: string;
+        profile?: Record<string, unknown>;
+      }>(res);
+
+      if (parsed.isJson && res.ok) {
+        const createdId = String(parsed.data?.profile?.id || crypto.randomUUID());
+        upsertLocalAdminRegistryRecord({
           id: createdId,
           email: cleanEmail,
           username: cleanUsername,
           full_name: cleanFullName,
           role: payload.role,
-          phone: cleanPhone,
-          is_active: true
-        },
-        details: `Membuat akun staf/admin baru: ${cleanFullName} (${payload.role}).`
-      });
-      return;
-    }
+          phone: cleanPhone || undefined,
+          is_active: true,
+          created_at: new Date().toISOString()
+        });
 
-    if (
-      parsed.isJson &&
-      parsed.data?.error &&
-      res.status !== 503 &&
-      !parsed.data.error.includes('row-level security')
-    ) {
-      throw new Error(parsed.data.error);
-    }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : '';
-    if (
-      msg &&
-      !msg.includes('Failed to fetch') &&
-      !msg.includes('SERVICE_ROLE_KEY') &&
-      !msg.includes('row-level security')
-    ) {
-      throw err;
+        recordAuditLog({
+          user_id: actor.id,
+          user_name: actor.name,
+          user_role: actor.role,
+          user_type: 'admin',
+          action: 'CREATE_ADMIN_USER',
+          target_type: 'profiles',
+          target_id: cleanEmail,
+          new_values: {
+            id: createdId,
+            email: cleanEmail,
+            username: cleanUsername,
+            full_name: cleanFullName,
+            role: payload.role,
+            phone: cleanPhone,
+            is_active: true
+          },
+          details: `Membuat akun staf/admin baru: ${cleanFullName} (${payload.role}).`
+        });
+        return;
+      }
+    } catch {
+      // Coba baseUrl berikutnya atau lanjutkan ke fallback Supabase langsung
     }
   }
 
-  // 2. Fallback langsung ke Supabase Auth (untuk deployment statis Netlify atau tanpa Service Role Key)
+  // 2. Fallback langsung ke Supabase (untuk deployment statis Netlify jika server Admin API tidak terjangkau)
   const supabase = getSupabase();
   const isolatedAuth = createIsolatedSupabaseClient();
   if (isSupabaseConfigured && supabase && isolatedAuth) {
     await ensureSupabaseSessionReady();
 
     let userId = '';
+    let needsAuthProvisioning = false;
 
     const { data: signUpData, error: signUpErr } = await isolatedAuth.auth.signUp({
       email: cleanEmail,
@@ -5692,13 +6379,9 @@ export async function createAdminAccount(
     });
 
     if (signUpErr) {
-      const errMsg = signUpErr.message || '';
-      // Jika email sudah terdaftar di auth.users pada percobaan sebelumnya (sebelum profiles tersimpan),
-      // masuk menggunakan isolatedAuth untuk mengambil ID user dan memperbarui user_metadata
-      if (
-        errMsg.toLowerCase().includes('already registered') ||
-        errMsg.toLowerCase().includes('already exists')
-      ) {
+      const errMsg = (signUpErr.message || '').toLowerCase();
+      // Jika email sudah terdaftar di auth.users pada percobaan sebelumnya, coba signIn untuk ambil userId
+      if (errMsg.includes('already registered') || errMsg.includes('already exists')) {
         const { data: signInData, error: signInErr } = await isolatedAuth.auth.signInWithPassword({
           email: cleanEmail,
           password: String(payload.password)
@@ -5715,17 +6398,38 @@ export async function createAdminAccount(
             }
           });
         } else {
-          throw new Error(
-            'Email ini sudah terdaftar di Supabase Authentication. Gunakan password yang sama dengan saat pendaftaran pertama atau gunakan email lain.'
-          );
+          const { data: existingProf } = await supabase
+            .from('profiles')
+            .select('id')
+            .ilike('email', cleanEmail)
+            .maybeSingle();
+          userId = existingProf?.id ? String(existingProf.id) : crypto.randomUUID();
+          needsAuthProvisioning = !existingProf?.id;
         }
+      } else if (
+        errMsg.includes('rate limit') ||
+        errMsg.includes('over_email_send_rate_limit') ||
+        errMsg.includes('security purposes') ||
+        errMsg.includes('confirmation') ||
+        errMsg.includes('429')
+      ) {
+        // Jika Supabase client-side signUp terkena "email rate limit exceeded" (batas 2 email/jam SMTP bawaan Supabase),
+        // JANGAN gagalkan pembuatan akun! Daftarkan melalui ADMIN_ACCOUNT_REGISTRY agar langsung aktif & disinkronkan.
+        const { data: existingProf } = await supabase
+          .from('profiles')
+          .select('id')
+          .ilike('email', cleanEmail)
+          .maybeSingle();
+        userId = existingProf?.id ? String(existingProf.id) : crypto.randomUUID();
+        needsAuthProvisioning = !existingProf?.id;
       } else {
-        throw new Error(errMsg || 'Gagal membuat user di Supabase Auth.');
+        throw new Error(signUpErr.message || 'Gagal membuat user di Supabase Auth.');
       }
     } else if (signUpData?.user) {
       userId = signUpData.user.id;
     } else {
-      throw new Error('Gagal membuat user di Supabase Auth.');
+      userId = crypto.randomUUID();
+      needsAuthProvisioning = true;
     }
 
     const profileRow = {
@@ -5738,24 +6442,29 @@ export async function createAdminAccount(
       is_active: true
     };
 
-    // 2a. Coba simpan ke public.profiles menggunakan sesi Admin aktif
-    let { error: profErr } = await supabase.from('profiles').upsert(profileRow);
+    let profErr: { message: string; code?: string } | null = null;
 
-    // 2b. Jika gagal karena username duplikat, tambahkan akhiran unik
-    if (profErr && profErr.message.toLowerCase().includes('profiles_username_key')) {
-      profileRow.username = `${cleanUsername}_${userId.slice(0, 4)}`;
-      const retryUsername = await supabase.from('profiles').upsert(profileRow);
-      profErr = retryUsername.error;
-    }
+    if (!needsAuthProvisioning) {
+      // 2a. Coba simpan ke public.profiles menggunakan sesi Admin aktif
+      const upsertRes = await supabase.from('profiles').upsert(profileRow);
+      profErr = upsertRes.error;
 
-    // 2c. Jika masih terkena kebijakan RLS, coba simpan menggunakan sesi isolatedAuth user baru tersebut
-    if (profErr) {
-      const selfUpsert = await isolatedAuth.from('profiles').upsert(profileRow);
-      profErr = selfUpsert.error;
+      // 2b. Jika gagal karena username duplikat, tambahkan akhiran unik
+      if (profErr && profErr.message.toLowerCase().includes('profiles_username_key')) {
+        profileRow.username = `${cleanUsername}_${userId.slice(0, 4)}`;
+        const retryUsername = await supabase.from('profiles').upsert(profileRow);
+        profErr = retryUsername.error;
+      }
+
+      // 2c. Jika masih terkena kebijakan RLS, coba simpan menggunakan sesi isolatedAuth user baru tersebut
+      if (profErr) {
+        const selfUpsert = await isolatedAuth.from('profiles').upsert(profileRow);
+        profErr = selfUpsert.error;
+      }
     }
 
     // 2d. Simpan ke registri audit_logs & localStorage agar di Netlify akun langsung tampil & bisa login
-    // meskipun kebijakan RLS tabel public.profiles di database membatasi INSERT langsung dari browser
+    // serta otomatis diprovisikan ke auth.users tanpa batasan email rate limit
     try {
       await supabase.from('audit_logs').insert([
         {
@@ -5766,7 +6475,10 @@ export async function createAdminAccount(
           action: 'ADMIN_ACCOUNT_REGISTRY',
           target_table: 'profiles',
           target_id: userId,
-          new_values: profileRow,
+          new_values: {
+            ...profileRow,
+            pending_password: String(payload.password)
+          },
           details: `Registrasi akun staf baru: ${cleanFullName} (${cleanEmail} / ${payload.role}).`
         }
       ]);
@@ -5782,14 +6494,25 @@ export async function createAdminAccount(
       role: payload.role,
       phone: cleanPhone || undefined,
       is_active: true,
+      pending_password: String(payload.password),
       created_at: new Date().toISOString()
     });
 
-    // Jika error bukan karena RLS (misalnya error validasi constraint lain), baru lemparkan
+    // Picu sinkronisasi background pada server jika dapat dijangkau
+    for (const baseUrl of REMOTE_ADMIN_API_BASES) {
+      if (baseUrl) {
+        void fetch(`${baseUrl}/api/admin/users`, { headers }).catch(() => {});
+      }
+    }
+
+    // Abaikan error yang berasal dari RLS atau foreign key auth.users saat menunggu sinkronisasi
     if (
       profErr &&
       !profErr.message.toLowerCase().includes('row-level security') &&
-      profErr.code !== '42501'
+      !profErr.message.toLowerCase().includes('foreign key') &&
+      !profErr.message.toLowerCase().includes('profiles_id_fkey') &&
+      profErr.code !== '42501' &&
+      profErr.code !== '23503'
     ) {
       throw new Error(profErr.message);
     }

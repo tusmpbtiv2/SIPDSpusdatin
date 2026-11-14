@@ -3,7 +3,7 @@ import { Siswa, calculateBiodataCompleteness } from '../../types';
 import { ZeroPillBadge } from '../../components/common/ZeroPillBadge';
 import { PrintBiodataF4Modal } from '../../components/common/PrintBiodataF4Modal';
 import { User, HeartPulse, Home, School, Phone, Edit3, Printer, Sparkles } from 'lucide-react';
-import { formatDateDMY, mapIncomeToRange } from '../../utils/formatters';
+import { formatDateDMY, formatDateLongID, mapIncomeToRange } from '../../utils/formatters';
 
 interface BiodataAnakPageProps {
   student: Siswa;
@@ -183,7 +183,7 @@ export const BiodataAnakPage: React.FC<BiodataAnakPageProps> = ({
             value={student.jenis_kelamin === 'L' ? 'Laki-laki (L)' : 'Perempuan (P)'}
           />
           <FieldBox label="Tempat Lahir" value={student.tempat_lahir} />
-          <FieldBox label="Tanggal Lahir" value={formatDateDMY(student.tanggal_lahir)} mono />
+          <FieldBox label="Tanggal Lahir" value={formatDateLongID(student.tanggal_lahir)} />
           <FieldBox label="Agama" value={student.agama} />
           <FieldBox label="Status Aktif" value={student.status === 'aktif' ? 'Aktif' : student.status} />
           <FieldBox label="Tanggal Masuk" value={formatDateDMY(student.tanggal_masuk)} mono />
@@ -276,7 +276,7 @@ export const BiodataAnakPage: React.FC<BiodataAnakPageProps> = ({
               <FieldBox label="Nama Ayah" value={student.nama_ayah} />
               <FieldBox label="NIK Ayah" value={student.nik_ayah} mono />
               <FieldBox label="Tempat Lahir Ayah" value={student.tempat_lahir_ayah} />
-              <FieldBox label="Tanggal Lahir Ayah" value={formatDateDMY(student.tgl_lahir_ayah)} mono />
+              <FieldBox label="Tanggal Lahir Ayah" value={formatDateLongID(student.tgl_lahir_ayah)} />
               <FieldBox label="Pendidikan Ayah" value={student.pendidikan_ayah} />
               <FieldBox label="Pekerjaan Ayah" value={student.pekerjaan_ayah} />
               <FieldBox label="No. WA Ayah" value={student.no_wa_ayah} mono />
@@ -290,7 +290,7 @@ export const BiodataAnakPage: React.FC<BiodataAnakPageProps> = ({
               <FieldBox label="Nama Ibu Kandung" value={student.nama_ibu} />
               <FieldBox label="NIK Ibu" value={student.nik_ibu} mono />
               <FieldBox label="Tempat Lahir Ibu" value={student.tempat_lahir_ibu} />
-              <FieldBox label="Tanggal Lahir Ibu" value={formatDateDMY(student.tgl_lahir_ibu)} mono />
+              <FieldBox label="Tanggal Lahir Ibu" value={formatDateLongID(student.tgl_lahir_ibu)} />
               <FieldBox label="Pendidikan Ibu" value={student.pendidikan_ibu} />
               <FieldBox label="Pekerjaan Ibu" value={student.pekerjaan_ibu} />
               <FieldBox label="No. WA Ibu" value={student.no_wa_ibu} mono />

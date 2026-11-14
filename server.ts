@@ -13,6 +13,18 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 app.use(express.json({ limit: '25mb' }));
 
+// Izinkan akses Cross-Origin (CORS) pada endpoint /api/* agar frontend di Netlify dapat memanggil Admin API server secara langsung
+app.use('/api', (req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 // ============================================================================
 // KONFIGURASI SUPABASE SERVER-SIDE (SERVICE ROLE KEY HANYA BERADA DI SERVER)
 // ============================================================================
@@ -77,6 +89,14 @@ function getSupabaseAuthClient(): SupabaseClient | null {
  */
 function buildInternalParentAuthEmail(nisn: string): string {
   return `ortu.${nisn}@auth-internal.smpbhinneka.sch.id`;
+}
+
+function buildInternalStaffAuthEmail(username: string): string {
+  const clean = String(username || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '');
+  return `staf.${clean || 'user'}@staf-internal.smpbhinneka.sch.id`;
 }
 
 // ============================================================================
@@ -144,21 +164,28 @@ app.post('/api/auth/admin-login', async (req: Request, res: Response) => {
   }
 
   try {
+    if (supabaseAdmin) {
+      await syncAllStaffProfilesWithSupabaseAdmin(supabaseAdmin).catch(() => {});
+    }
+
     let emailToLogin = String(identifier).trim().toLowerCase();
 
-    // Jika login menggunakan username (bukan email), cari email di tabel profiles melalui service role
-    if (!emailToLogin.includes('@') && supabaseAdmin) {
-      const { data: profileByUser } = await supabaseAdmin
-        .from('profiles')
-        .select('email, role, is_active')
-        .ilike('username', emailToLogin)
-        .maybeSingle();
+    // Jika login menggunakan username (bukan email), cari email di tabel profiles melalui service role atau gunakan email internal staf
+    if (!emailToLogin.includes('@')) {
+      if (supabaseAdmin) {
+        const { data: profileByUser } = await supabaseAdmin
+          .from('profiles')
+          .select('email, role, is_active')
+          .ilike('username', emailToLogin)
+          .maybeSingle();
 
-      if (!profileByUser || !profileByUser.email) {
-        res.status(401).json({ error: 'Username admin tidak ditemukan.' });
-        return;
+        if (profileByUser?.email) {
+          emailToLogin = profileByUser.email;
+        }
       }
-      emailToLogin = profileByUser.email;
+      if (!emailToLogin.includes('@')) {
+        emailToLogin = buildInternalStaffAuthEmail(emailToLogin);
+      }
     }
 
     const { data: authData, error: authErr } = await supabaseAuth.auth.signInWithPassword({
@@ -909,43 +936,136 @@ async function syncAllStaffProfilesWithSupabaseAdmin(
     }
   }
 
-  // Sinkronkan juga perubahan role/status dari audit_logs (ADMIN_ACCOUNT_REGISTRY / UPDATE_ADMIN_PROFILE) jika dibuat dari Netlify
+  // Sinkronkan juga akun baru / perubahan role/status dari audit_logs (ADMIN_ACCOUNT_REGISTRY / UPDATE_ADMIN_PROFILE) jika dibuat dari Netlify saat email rate limit exceeded
   try {
     const { data: regLogs } = await supabaseAdmin
       .from('audit_logs')
-      .select('action, target_id, new_values, created_at')
+      .select('id, action, target_id, new_values, created_at')
       .in('action', ['ADMIN_ACCOUNT_REGISTRY', 'UPDATE_ADMIN_PROFILE'])
       .order('created_at', { ascending: true })
       .limit(200);
 
+    const authUserByEmail = new Map<string, { id: string; email?: string }>();
+    for (const u of authUsers) {
+      const em = String(u.email || '').trim().toLowerCase();
+      if (em) authUserByEmail.set(em, u);
+    }
+
     for (const log of (regLogs || []) as Array<{
+      id?: string;
       action?: string;
       target_id?: string;
       new_values?: Record<string, unknown>;
     }>) {
       const vals = log.new_values || {};
-      const targetId = String(vals.id || log.target_id || '').trim();
-      if (!targetId) continue;
 
-      if (log.action === 'UPDATE_ADMIN_PROFILE' && profileById.has(targetId)) {
-        const current = profileById.get(targetId)!;
-        const nextRole =
-          vals.role && ['super_admin', 'admin', 'operator', 'viewer'].includes(String(vals.role))
-            ? String(vals.role)
-            : String(current.role);
-        const nextActive =
-          typeof vals.is_active === 'boolean' ? vals.is_active : current.is_active !== false;
+      if (log.action === 'ADMIN_ACCOUNT_REGISTRY' && vals.email) {
+        const cleanEmail = String(vals.email).trim().toLowerCase();
+        const roleVal = ['super_admin', 'admin', 'operator', 'viewer'].includes(String(vals.role))
+          ? String(vals.role)
+          : 'operator';
+        const baseUsername = String(vals.username || cleanEmail.split('@')[0])
+          .trim()
+          .toLowerCase();
+        const fullName = String(vals.full_name || cleanEmail.split('@')[0]).trim();
+        const phone = vals.phone ? String(vals.phone).trim() : null;
+        const pendingPassword = vals.pending_password ? String(vals.pending_password) : '';
 
-        if (current.role !== nextRole || current.is_active !== nextActive) {
-          const { data: updated } = await supabaseAdmin
-            .from('profiles')
-            .update({ role: nextRole, is_active: nextActive })
-            .eq('id', targetId)
-            .select('*')
-            .maybeSingle();
-          if (updated) {
-            profileById.set(targetId, updated as Record<string, unknown>);
+        let existingAuth = authUserByEmail.get(cleanEmail);
+        let realUserId = existingAuth?.id || '';
+
+        if (!existingAuth && pendingPassword.length >= 8) {
+          const { data: createdAuth } = await supabaseAdmin.auth.admin.createUser({
+            email: cleanEmail,
+            password: pendingPassword,
+            email_confirm: true,
+            user_metadata: {
+              role: roleVal,
+              full_name: fullName,
+              username: baseUsername,
+              phone,
+              is_active: true
+            }
+          });
+          if (createdAuth?.user) {
+            realUserId = createdAuth.user.id;
+            authUserByEmail.set(cleanEmail, { id: realUserId, email: cleanEmail });
             didSyncAny = true;
+          }
+        } else if (existingAuth && pendingPassword.length >= 8) {
+          await supabaseAdmin.auth.admin.updateUserById(existingAuth.id, {
+            password: pendingPassword,
+            email_confirm: true,
+            user_metadata: {
+              role: roleVal,
+              full_name: fullName,
+              username: baseUsername,
+              phone,
+              is_active: true
+            }
+          });
+        }
+
+        if (realUserId) {
+          if (!profileById.has(realUserId)) {
+            const finalUsername = usedUsernames.has(baseUsername)
+              ? `${baseUsername}_${realUserId.slice(0, 4)}`
+              : baseUsername;
+            const { data: upserted } = await supabaseAdmin
+              .from('profiles')
+              .upsert({
+                id: realUserId,
+                email: cleanEmail,
+                username: finalUsername,
+                full_name: fullName,
+                role: roleVal,
+                phone,
+                is_active: vals.is_active !== false
+              })
+              .select('*')
+              .maybeSingle();
+
+            if (upserted) {
+              usedUsernames.add(finalUsername);
+              profileById.set(realUserId, upserted as Record<string, unknown>);
+              didSyncAny = true;
+            }
+          }
+
+          // Bersihkan pending_password dari audit_logs setelah berhasil diprovisikan ke auth.users
+          if (log.id && pendingPassword) {
+            const sanitizedValues: Record<string, unknown> = { ...vals, id: realUserId };
+            delete sanitizedValues.pending_password;
+            await supabaseAdmin
+              .from('audit_logs')
+              .update({ target_id: realUserId, new_values: sanitizedValues })
+              .eq('id', log.id);
+          }
+        }
+      } else if (log.action === 'UPDATE_ADMIN_PROFILE') {
+        const targetId = String(vals.id || log.target_id || '').trim();
+        if (!targetId) continue;
+
+        if (profileById.has(targetId)) {
+          const current = profileById.get(targetId)!;
+          const nextRole =
+            vals.role && ['super_admin', 'admin', 'operator', 'viewer'].includes(String(vals.role))
+              ? String(vals.role)
+              : String(current.role);
+          const nextActive =
+            typeof vals.is_active === 'boolean' ? vals.is_active : current.is_active !== false;
+
+          if (current.role !== nextRole || current.is_active !== nextActive) {
+            const { data: updated } = await supabaseAdmin
+              .from('profiles')
+              .update({ role: nextRole, is_active: nextActive })
+              .eq('id', targetId)
+              .select('*')
+              .maybeSingle();
+            if (updated) {
+              profileById.set(targetId, updated as Record<string, unknown>);
+              didSyncAny = true;
+            }
           }
         }
       }
@@ -991,13 +1111,18 @@ app.get('/api/admin/users', async (_req: Request, res: Response) => {
 app.post('/api/admin/users/create', async (req: Request, res: Response) => {
   const { email, username, full_name, role, password, phone } = req.body;
 
-  if (!email || !full_name || !role || !password) {
-    res.status(400).json({ error: 'Email, nama lengkap, role, dan password wajib diisi.' });
+  if (!full_name || !role || !password) {
+    res.status(400).json({ error: 'Nama lengkap, role, dan password wajib diisi.' });
     return;
   }
 
   if (!['super_admin', 'admin', 'operator', 'viewer'].includes(String(role))) {
     res.status(400).json({ error: 'Role tidak valid.' });
+    return;
+  }
+
+  if (String(role) === 'super_admin' && (!email || !String(email).includes('@'))) {
+    res.status(400).json({ error: 'Email wajib diisi untuk akun Super Admin.' });
     return;
   }
 
@@ -1015,10 +1140,20 @@ app.post('/api/admin/users/create', async (req: Request, res: Response) => {
   }
 
   try {
-    const cleanEmail = String(email).trim().toLowerCase();
-    const cleanUsername = String(username || cleanEmail.split('@')[0])
+    const rawEmail = String(email || '').trim().toLowerCase();
+    const cleanUsername = String(
+      username || (rawEmail.includes('@') ? rawEmail.split('@')[0] : full_name)
+    )
       .trim()
-      .toLowerCase();
+      .toLowerCase()
+      .replace(/\s+/g, '_');
+
+    const cleanEmail =
+      String(role) === 'super_admin' && rawEmail.includes('@')
+        ? rawEmail
+        : rawEmail.includes('@')
+        ? rawEmail
+        : buildInternalStaffAuthEmail(cleanUsername);
 
     let userId = '';
 
@@ -2209,6 +2344,457 @@ app.post('/api/school-profile', async (req: Request, res: Response) => {
   } catch (err: unknown) {
     res.status(500).json({
       error: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan lembaga.'
+    });
+  }
+});
+
+// ============================================================================
+// 17. PERIODE / EVENT KONFIRMASI DATA SISWA & PENGAJUAN ORANG TUA
+// ============================================================================
+
+async function reconstructConfirmationStateFromSupabase(client: SupabaseClient) {
+  const { data: logs } = await client
+    .from('audit_logs')
+    .select('id, action, target_id, new_values, details, created_at')
+    .in('action', [
+      'CONFIRMATION_EVENT_UPSERT',
+      'CONFIRMATION_EVENT_DELETE',
+      'STUDENT_DATA_CONFIRMATION',
+      'PARENT_CHANGE_REQUEST_SUBMIT',
+      'VERIFY_CHANGE_REQUEST_APPROVED',
+      'VERIFY_CHANGE_REQUEST_PARTIALLY_APPROVED',
+      'VERIFY_CHANGE_REQUEST_REJECTED'
+    ])
+    .order('created_at', { ascending: true })
+    .limit(2000);
+
+  const eventsMap = new Map<string, Record<string, unknown>>();
+  const confirmationsMap = new Map<string, Record<string, unknown>>();
+  const changeRequestsMap = new Map<string, Record<string, unknown>>();
+
+  for (const row of (logs || []) as Array<{
+    id?: string;
+    action?: string;
+    target_id?: string;
+    new_values?: Record<string, unknown>;
+    details?: string;
+    created_at?: string;
+  }>) {
+    let payload: Record<string, unknown> | null = null;
+    if (row.new_values && typeof row.new_values === 'object') {
+      payload = row.new_values;
+    } else if (typeof row.details === 'string' && row.details.trim().startsWith('{')) {
+      try {
+        payload = JSON.parse(row.details);
+      } catch {
+        payload = null;
+      }
+    }
+
+    if (row.action === 'CONFIRMATION_EVENT_UPSERT' && payload && payload.id) {
+      eventsMap.set(String(payload.id), payload);
+    } else if (row.action === 'CONFIRMATION_EVENT_DELETE') {
+      const targetId = String(row.target_id || payload?.id || '');
+      if (targetId) eventsMap.delete(targetId);
+    } else if (row.action === 'STUDENT_DATA_CONFIRMATION' && payload) {
+      const key = `${String(payload.event_id || '')}::${String(payload.nisn || payload.siswa_id || '')}`;
+      confirmationsMap.set(key, payload);
+    } else if (row.action === 'PARENT_CHANGE_REQUEST_SUBMIT' && payload && payload.id) {
+      changeRequestsMap.set(String(payload.id), payload);
+    } else if (
+      row.action?.startsWith('VERIFY_CHANGE_REQUEST_') &&
+      row.target_id
+    ) {
+      const reqId = String(row.target_id);
+      const finalStatus = row.action.includes('PARTIALLY_APPROVED')
+        ? 'partially_approved'
+        : row.action.includes('APPROVED')
+        ? 'approved'
+        : 'rejected';
+
+      const existingReq = changeRequestsMap.get(reqId);
+      if (existingReq) {
+        existingReq.status = finalStatus;
+        existingReq.verified_at = row.created_at || new Date().toISOString();
+      }
+
+      if (finalStatus === 'approved' || finalStatus === 'partially_approved') {
+        for (const [k, conf] of confirmationsMap.entries()) {
+          if (String(conf.change_request_id || '') === reqId) {
+            confirmationsMap.set(k, {
+              ...conf,
+              status: 'correction_approved',
+              verified_at: row.created_at || new Date().toISOString()
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Periksa juga status pada tabel student_change_requests untuk menyinkronkan status 'correction_approved'
+  try {
+    const { data: dbReqs } = await client
+      .from('student_change_requests')
+      .select('id, status, reviewed_at, reviewer_name');
+    if (dbReqs) {
+      const dbStatusById = new Map<string, { status: string; reviewed_at?: string; reviewer_name?: string }>();
+      for (const r of dbReqs as Array<{ id: string; status: string; reviewed_at?: string; reviewer_name?: string }>) {
+        dbStatusById.set(String(r.id), r);
+      }
+      for (const [k, conf] of confirmationsMap.entries()) {
+        const reqId = String(conf.change_request_id || '');
+        if (reqId && dbStatusById.has(reqId)) {
+          const st = dbStatusById.get(reqId)!;
+          if (st.status === 'approved' || st.status === 'partially_approved') {
+            confirmationsMap.set(k, {
+              ...conf,
+              status: 'correction_approved',
+              verified_at: st.reviewed_at || conf.verified_at,
+              verified_by_name: st.reviewer_name || conf.verified_by_name
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  const events = Array.from(eventsMap.values()).sort((a, b) =>
+    String(b.created_at || '').localeCompare(String(a.created_at || ''))
+  );
+  const confirmations = Array.from(confirmationsMap.values()).sort((a, b) =>
+    String(b.confirmed_at || '').localeCompare(String(a.confirmed_at || ''))
+  );
+  const auditChangeRequests = Array.from(changeRequestsMap.values()).sort((a, b) =>
+    String(b.submitted_at || '').localeCompare(String(a.submitted_at || ''))
+  );
+
+  const supabaseAdmin = getSupabaseAdminClient();
+  if (supabaseAdmin) {
+    try {
+      await supabaseAdmin.storage
+        .from('sipds-public')
+        .upload(
+          'confirmation-state.json',
+          Buffer.from(JSON.stringify({ events, confirmations, updatedAt: new Date().toISOString() })),
+          { contentType: 'application/json', upsert: true }
+        );
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  return { events, confirmations, auditChangeRequests };
+}
+
+app.get('/api/confirmation-events', async (_req: Request, res: Response) => {
+  const client = getSupabaseAdminClient() || getSupabaseAuthClient();
+  if (!client) {
+    res.status(503).json({ error: 'Supabase belum dikonfigurasi pada server.' });
+    return;
+  }
+
+  try {
+    const state = await reconstructConfirmationStateFromSupabase(client);
+    res.json({
+      events: state.events,
+      confirmations: state.confirmations
+    });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memuat periode konfirmasi data.'
+    });
+  }
+});
+
+app.post('/api/confirmation-events', async (req: Request, res: Response) => {
+  const { action, event, eventId, actorName, actorRole } = req.body as {
+    action?: 'upsert' | 'delete';
+    event?: Record<string, unknown>;
+    eventId?: string;
+    actorName?: string;
+    actorRole?: string;
+  };
+
+  const client = getSupabaseAdminClient() || getSupabaseAuthClient();
+  if (!client) {
+    res.status(503).json({ error: 'Supabase belum dikonfigurasi pada server.' });
+    return;
+  }
+
+  try {
+    if (action === 'delete' && eventId) {
+      await client.from('audit_logs').insert([
+        {
+          actor_name: actorName || 'Admin Sekolah',
+          actor_role: actorRole || 'admin',
+          actor_type: 'admin',
+          action: 'CONFIRMATION_EVENT_DELETE',
+          target_table: 'confirmation_events',
+          target_id: String(eventId),
+          new_values: { id: String(eventId) },
+          details: JSON.stringify({ id: String(eventId) })
+        }
+      ]);
+    } else if (event && event.id) {
+      const serialized = JSON.stringify(event);
+      await client.from('audit_logs').insert([
+        {
+          actor_name: actorName || 'Admin Sekolah',
+          actor_role: actorRole || 'admin',
+          actor_type: 'admin',
+          action: 'CONFIRMATION_EVENT_UPSERT',
+          target_table: 'confirmation_events',
+          target_id: String(event.id),
+          new_values: event,
+          details: serialized
+        }
+      ]);
+    } else {
+      res.status(400).json({ error: 'Data periode konfirmasi tidak valid.' });
+      return;
+    }
+
+    const state = await reconstructConfirmationStateFromSupabase(client);
+    res.json({
+      success: true,
+      events: state.events,
+      confirmations: state.confirmations
+    });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan periode konfirmasi data.'
+    });
+  }
+});
+
+// Helper: simpan pengajuan perubahan data orang tua di server menggunakan Service Role Key
+async function insertParentChangeRequestWithAdmin(
+  client: SupabaseClient,
+  proposal: Record<string, unknown>,
+  initialStatus: 'draft' | 'pending' = 'pending'
+): Promise<Record<string, unknown>> {
+  const nisn = String(proposal.nisn || '').trim();
+  const siswaId = String(proposal.siswa_id || '').trim();
+  const nowIso = new Date().toISOString();
+
+  // Cari user_id yang sah dari parent_student_access atau profiles (untuk kolom FK requested_by)
+  let requestedByUserId: string | null = null;
+  try {
+    const { data: psa } = await client
+      .from('parent_student_access')
+      .select('user_id')
+      .eq('nisn', nisn)
+      .maybeSingle();
+    if (psa?.user_id) {
+      requestedByUserId = String(psa.user_id);
+    }
+    if (!requestedByUserId) {
+      const { data: anyProfile } = await client
+        .from('profiles')
+        .select('id')
+        .limit(1)
+        .maybeSingle();
+      if (anyProfile?.id) {
+        requestedByUserId = String(anyProfile.id);
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  let createdReqId = String(proposal.id || (crypto.randomUUID ? crypto.randomUUID() : `prb-${Date.now()}`));
+  let savedToTable = false;
+
+  if (requestedByUserId && siswaId) {
+    try {
+      const { data: reqHeader, error: reqErr } = await client
+        .from('student_change_requests')
+        .insert({
+          student_id: siswaId,
+          requested_by: requestedByUserId,
+          requester_name: proposal.requester_name || 'Orang Tua / Wali',
+          requester_relation: proposal.requester_relation || 'Wali',
+          nis: proposal.nis || null,
+          nisn,
+          nama_siswa: proposal.nama_siswa,
+          kelas: proposal.kelas,
+          alasan_pengajuan: proposal.alasan,
+          dokumen_pendukung_nama: proposal.dokumen_pendukung_nama || null,
+          status: initialStatus
+        })
+        .select('*')
+        .single();
+
+      if (!reqErr && reqHeader?.id) {
+        createdReqId = String(reqHeader.id);
+        savedToTable = true;
+        const fieldsChanged = (proposal.fields_changed || {}) as Record<
+          string,
+          { label?: string; old_value?: string; new_value?: string }
+        >;
+        const itemRows = Object.entries(fieldsChanged).map(([fieldName, val]) => ({
+          change_request_id: reqHeader.id,
+          field_name: fieldName,
+          field_label: val.label || fieldName,
+          old_value: String(val.old_value ?? '-'),
+          new_value: String(val.new_value ?? '-'),
+          item_status: 'pending'
+        }));
+        if (itemRows.length > 0) {
+          await client.from('student_change_request_items').insert(itemRows);
+        }
+      }
+    } catch {
+      // Fallback ke audit_logs di bawah
+    }
+  }
+
+  const fullProposal: Record<string, unknown> = {
+    ...proposal,
+    id: createdReqId,
+    status: initialStatus,
+    submitted_at: nowIso,
+    saved_to_table: savedToTable
+  };
+
+  await client.from('audit_logs').insert([
+    {
+      actor_name: String(proposal.requester_name || `Orang Tua (${nisn})`),
+      actor_role: 'parent',
+      actor_type: 'parent',
+      action: 'PARENT_CHANGE_REQUEST_SUBMIT',
+      target_table: 'student_change_requests',
+      target_id: createdReqId,
+      new_values: fullProposal,
+      details: JSON.stringify(fullProposal)
+    }
+  ]);
+
+  return fullProposal;
+}
+
+app.post('/api/parent/change-requests', async (req: Request, res: Response) => {
+  const { proposal, initialStatus } = req.body as {
+    proposal?: Record<string, unknown>;
+    initialStatus?: 'draft' | 'pending';
+  };
+
+  if (!proposal || !proposal.nisn) {
+    res.status(400).json({ error: 'Data pengajuan perubahan biodata tidak lengkap.' });
+    return;
+  }
+
+  const client = getSupabaseAdminClient() || getSupabaseAuthClient();
+  if (!client) {
+    res.status(503).json({ error: 'Supabase belum dikonfigurasi pada server.' });
+    return;
+  }
+
+  try {
+    const saved = await insertParentChangeRequestWithAdmin(
+      client,
+      proposal,
+      initialStatus || 'pending'
+    );
+    res.json({ success: true, proposal: saved });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan pengajuan perubahan data.'
+    });
+  }
+});
+
+app.get('/api/parent/change-requests', async (req: Request, res: Response) => {
+  const filterNisn = req.query.nisn ? String(req.query.nisn).trim() : '';
+  const client = getSupabaseAdminClient() || getSupabaseAuthClient();
+  if (!client) {
+    res.status(503).json({ error: 'Supabase belum dikonfigurasi pada server.' });
+    return;
+  }
+
+  try {
+    let query = client
+      .from('student_change_requests')
+      .select('*, student_change_request_items(*), students(nis, nama_wali, nama_ayah, nama_ibu_kandung)')
+      .order('submitted_at', { ascending: false });
+
+    if (filterNisn) {
+      query = query.eq('nisn', filterNisn);
+    }
+
+    const { data: tableRows } = await query;
+    const state = await reconstructConfirmationStateFromSupabase(client);
+
+    res.json({
+      tableRows: tableRows || [],
+      auditChangeRequests: filterNisn
+        ? state.auditChangeRequests.filter(r => String(r.nisn || '') === filterNisn)
+        : state.auditChangeRequests
+    });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memuat daftar pengajuan perubahan.'
+    });
+  }
+});
+
+app.post('/api/parent/confirm-data', async (req: Request, res: Response) => {
+  const { confirmation, changeProposal } = req.body as {
+    confirmation?: Record<string, unknown>;
+    changeProposal?: Record<string, unknown>;
+  };
+
+  if (!confirmation || !confirmation.event_id || !confirmation.nisn) {
+    res.status(400).json({ error: 'Data konfirmasi siswa tidak lengkap.' });
+    return;
+  }
+
+  const client = getSupabaseAdminClient() || getSupabaseAuthClient();
+  if (!client) {
+    res.status(503).json({ error: 'Supabase belum dikonfigurasi pada server.' });
+    return;
+  }
+
+  try {
+    let savedProposal: Record<string, unknown> | null = null;
+    if (changeProposal && changeProposal.fields_changed) {
+      savedProposal = await insertParentChangeRequestWithAdmin(client, changeProposal, 'pending');
+    }
+
+    const finalConfirmation: Record<string, unknown> = {
+      ...confirmation,
+      id: String(confirmation.id || (crypto.randomUUID ? crypto.randomUUID() : `conf-${Date.now()}`)),
+      change_request_id: savedProposal?.id || confirmation.change_request_id || undefined,
+      confirmed_at: String(confirmation.confirmed_at || new Date().toISOString())
+    };
+
+    const serialized = JSON.stringify(finalConfirmation);
+    await client.from('audit_logs').insert([
+      {
+        actor_name: String(finalConfirmation.nama_wali || `Wali (${finalConfirmation.nisn})`),
+        actor_role: 'parent',
+        actor_type: 'parent',
+        action: 'STUDENT_DATA_CONFIRMATION',
+        target_table: 'confirmation_events',
+        target_id: String(finalConfirmation.event_id),
+        new_values: finalConfirmation,
+        details: serialized
+      }
+    ]);
+
+    const state = await reconstructConfirmationStateFromSupabase(client);
+    res.json({
+      success: true,
+      confirmation: finalConfirmation,
+      changeProposal: savedProposal,
+      confirmations: state.confirmations
+    });
+  } catch (err: unknown) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan konfirmasi data siswa.'
     });
   }
 });

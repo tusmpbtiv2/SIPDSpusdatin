@@ -1783,29 +1783,73 @@ export function exportStudentsToExcel(
     format?: 'xlsx' | 'csv';
     excludeSensitiveFamilyInfo?: boolean;
     fileNamePrefix?: string;
+    selectedColumns?: string[];
   }
 ): void {
   const format = options?.format || 'xlsx';
   const excludeSensitive = Boolean(options?.excludeSensitiveFamilyInfo);
   const prefix = options?.fileNamePrefix || 'Data_Induk_Siswa_SIPDS';
+  const customColumnKeys = options?.selectedColumns?.filter(Boolean) || [];
 
-  const activeFields = ALL_59_STUDENT_FIELDS.filter(
-    field => !(excludeSensitive && field.sensitive)
-  );
+  const fieldMap = new Map(ALL_59_STUDENT_FIELDS.map(f => [String(f.key), f]));
 
-  const exportRows = students.map(s => {
-    const obj: Record<string, string> = {
-      'ANGKATAN': String(s.angkatan || s.tahun_masuk || ''),
-      'TAHUN LULUS': String(s.tahun_lulus || '-')
-    };
-    for (const field of activeFields) {
-      const val = s[field.key];
-      obj[field.excelHeader] = val !== undefined && val !== null ? String(val) : '';
+  let headers: string[] = [];
+  let exportRows: Record<string, string>[] = [];
+
+  if (customColumnKeys.length > 0) {
+    const resolvedCols: { key: string; header: string }[] = [];
+    for (const colKey of customColumnKeys) {
+      if (colKey === 'NO') {
+        resolvedCols.push({ key: 'NO', header: 'NO' });
+      } else if (colKey === 'ANGKATAN') {
+        resolvedCols.push({ key: 'ANGKATAN', header: 'ANGKATAN' });
+      } else if (colKey === 'TAHUN_LULUS') {
+        resolvedCols.push({ key: 'TAHUN_LULUS', header: 'TAHUN LULUS' });
+      } else {
+        const field = fieldMap.get(colKey);
+        if (field && !(excludeSensitive && field.sensitive)) {
+          resolvedCols.push({ key: String(field.key), header: field.excelHeader });
+        }
+      }
     }
-    return obj;
-  });
 
-  const headers = ['ANGKATAN', 'TAHUN LULUS', ...activeFields.map(f => f.excelHeader)];
+    headers = resolvedCols.map(c => c.header);
+    exportRows = students.map((s, idx) => {
+      const obj: Record<string, string> = {};
+      for (const col of resolvedCols) {
+        if (col.key === 'NO') {
+          obj[col.header] = String(idx + 1);
+        } else if (col.key === 'ANGKATAN') {
+          obj[col.header] = String(s.angkatan || s.tahun_masuk || '');
+        } else if (col.key === 'TAHUN_LULUS') {
+          obj[col.header] = String(s.tahun_lulus || '-');
+        } else {
+          const val = s[col.key as keyof Siswa];
+          obj[col.header] = val !== undefined && val !== null ? String(val) : '';
+        }
+      }
+      return obj;
+    });
+  } else {
+    const activeFields = ALL_59_STUDENT_FIELDS.filter(
+      field => !(excludeSensitive && field.sensitive)
+    );
+
+    exportRows = students.map(s => {
+      const obj: Record<string, string> = {
+        'ANGKATAN': String(s.angkatan || s.tahun_masuk || ''),
+        'TAHUN LULUS': String(s.tahun_lulus || '-')
+      };
+      for (const field of activeFields) {
+        const val = s[field.key];
+        obj[field.excelHeader] = val !== undefined && val !== null ? String(val) : '';
+      }
+      return obj;
+    });
+
+    headers = ['ANGKATAN', 'TAHUN LULUS', ...activeFields.map(f => f.excelHeader)];
+  }
+
   const ws = XLSX.utils.json_to_sheet(exportRows, { header: headers });
 
   // Pastikan seluruh sel nomor identitas bertipe string ('s') agar nol di depan tidak hilang di Excel

@@ -14,7 +14,8 @@ import {
   LogOut,
   Menu,
   X,
-  GraduationCap
+  GraduationCap,
+  ClipboardCheck
 } from 'lucide-react';
 
 interface ParentLayoutProps {
@@ -37,6 +38,7 @@ export const ParentLayout: React.FC<ParentLayoutProps> = ({
   const renderIcon = (iconName: string) => {
     switch (iconName) {
       case 'LayoutDashboard': return <LayoutDashboard className="w-4 h-4 shrink-0" />;
+      case 'ClipboardCheck': return <ClipboardCheck className="w-4 h-4 shrink-0" />;
       case 'User': return <User className="w-4 h-4 shrink-0" />;
       case 'Edit3': return <Edit3 className="w-4 h-4 shrink-0" />;
       case 'Clock': return <Clock className="w-4 h-4 shrink-0" />;
@@ -179,6 +181,15 @@ export const ParentLayout: React.FC<ParentLayoutProps> = ({
         >
           <LayoutDashboard className="w-4 h-4 mb-0.5" />
           <span>Beranda</span>
+        </button>
+        <button
+          onClick={() => onSelectMenu('konfirmasi-data-parent')}
+          className={`flex flex-col items-center justify-center py-1 px-2 rounded-lg text-[10px] font-semibold ${
+            currentMenu === 'konfirmasi-data-parent' ? 'text-blue-900' : 'text-slate-500'
+          }`}
+        >
+          <ClipboardCheck className="w-4 h-4 mb-0.5" />
+          <span>Konfirmasi</span>
         </button>
         <button
           onClick={() => onSelectMenu('biodata-anak')}

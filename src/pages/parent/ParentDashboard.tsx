@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Siswa, PerubahanBiodata, calculateBiodataCompleteness } from '../../types';
-import { getPerubahanByNisn } from '../../services/dataService';
+import {
+  Siswa,
+  PerubahanBiodata,
+  calculateBiodataCompleteness,
+  DataConfirmationEvent,
+  StudentDataConfirmationRecord
+} from '../../types';
+import { getPerubahanByNisn, getConfirmationEventsState } from '../../services/dataService';
+import { formatDateLongID, isDateFieldKey } from '../../utils/formatters';
 import { ZeroPillBadge } from '../../components/common/ZeroPillBadge';
 import { useSchoolProfile } from '../../services/schoolService';
 import {
@@ -15,7 +22,9 @@ import {
   AlertCircle,
   Sparkles,
   History,
-  FileText
+  FileText,
+  ClipboardCheck,
+  Calendar
 } from 'lucide-react';
 
 interface ParentDashboardProps {
@@ -27,6 +36,8 @@ export const ParentDashboard: React.FC<ParentDashboardProps> = ({ student, onNav
   const { profile: schoolProfile } = useSchoolProfile();
   const [proposals, setProposals] = useState<PerubahanBiodata[]>([]);
   const [loadingProposals, setLoadingProposals] = useState(true);
+  const [activeEvents, setActiveEvents] = useState<DataConfirmationEvent[]>([]);
+  const [confirmations, setConfirmations] = useState<StudentDataConfirmationRecord[]>([]);
 
   useEffect(() => {
     setLoadingProposals(true);
@@ -34,7 +45,20 @@ export const ParentDashboard: React.FC<ParentDashboardProps> = ({ student, onNav
       .then(setProposals)
       .catch(() => {})
       .finally(() => setLoadingProposals(false));
-  }, [student.nisn]);
+
+    getConfirmationEventsState()
+      .then(state => {
+        const studentClass = (student.rombel || '').trim().toUpperCase();
+        const filtered = (state.events || []).filter(ev => {
+          if (!ev.is_active) return false;
+          if (!ev.target_classes || ev.target_classes.length === 0) return true;
+          return ev.target_classes.map(c => c.toUpperCase()).includes(studentClass);
+        });
+        setActiveEvents(filtered);
+        setConfirmations(state.confirmations || []);
+      })
+      .catch(() => {});
+  }, [student.nisn, student.rombel]);
 
   const completeness = calculateBiodataCompleteness(student);
   const draftCount = proposals.filter(p => p.status === 'draft').length;
@@ -63,6 +87,13 @@ export const ParentDashboard: React.FC<ParentDashboardProps> = ({ student, onNav
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <button
+            onClick={() => onNavigate('konfirmasi-data-parent')}
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs"
+          >
+            <ClipboardCheck className="w-3.5 h-3.5" />
+            <span>Konfirmasi Data Siswa</span>
+          </button>
+          <button
             onClick={() => onNavigate('biodata-anak')}
             className="px-4 py-2.5 bg-white/10 hover:bg-white/15 text-white border border-white/15 rounded-lg text-xs font-semibold transition-colors"
           >
@@ -77,6 +108,73 @@ export const ParentDashboard: React.FC<ParentDashboardProps> = ({ student, onNav
           </button>
         </div>
       </div>
+
+      {/* Active Data Confirmation Events Banner */}
+      {activeEvents.length > 0 && (
+        <div className="space-y-3">
+          {activeEvents.map(ev => {
+            const conf = confirmations.find(
+              c => c.event_id === ev.id && String(c.nisn).trim() === String(student.nisn).trim()
+            );
+            const isConfirmed =
+              conf?.status === 'confirmed_valid' || conf?.status === 'submitted_correction';
+
+            return (
+              <div
+                key={ev.id}
+                className={`rounded-xl border p-5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4 ${
+                  isConfirmed
+                    ? 'bg-emerald-50/80 border-emerald-200'
+                    : 'bg-amber-50/90 border-amber-300'
+                }`}
+              >
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-bold ${
+                        isConfirmed
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-amber-600 text-white'
+                      }`}
+                    >
+                      <ClipboardCheck className="w-3.5 h-3.5" />
+                      {isConfirmed ? 'SUDAH KONFIRMASI DATA' : 'WAJIB KONFIRMASI DATA SISWA'}
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
+                      <Calendar className="w-3.5 h-3.5 text-slate-500" />
+                      Periode: {ev.tanggal_mulai} s/d {ev.tanggal_selesai}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-white/80 border border-slate-200 text-[11px] font-mono font-bold text-slate-700">
+                      {ev.target_columns.length} Kolom Identitas
+                    </span>
+                  </div>
+                  <h3 className="text-base font-extrabold text-slate-900">{ev.nama_periode}</h3>
+                  {ev.deskripsi && (
+                    <p className="text-xs text-slate-700 leading-relaxed">{ev.deskripsi}</p>
+                  )}
+                </div>
+
+                <div className="shrink-0">
+                  <button
+                    onClick={() => onNavigate('konfirmasi-data-parent')}
+                    className={`px-4 py-2.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors shadow-xs ${
+                      isConfirmed
+                        ? 'bg-emerald-700 hover:bg-emerald-800 text-white'
+                        : 'bg-blue-900 hover:bg-blue-800 text-white'
+                    }`}
+                  >
+                    <ClipboardCheck className="w-4 h-4" />
+                    <span>
+                      {isConfirmed ? 'Lihat Bukti Konfirmasi Data' : 'Buka & Konfirmasi Data Sekarang'}
+                    </span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Indikator Kelengkapan Biodata (59 Kolom) */}
       <div className="bg-white rounded-xl border border-slate-200 p-5 sm:p-6 shadow-xs space-y-4">
@@ -190,7 +288,7 @@ export const ParentDashboard: React.FC<ParentDashboardProps> = ({ student, onNav
               <div>
                 <span className="text-slate-400 block">Tempat, Tgl Lahir</span>
                 <span className="font-semibold text-slate-800 mt-0.5 block">
-                  {student.tempat_lahir || '-'}, {student.tanggal_lahir || '-'}
+                  {student.tempat_lahir || '-'}, {formatDateLongID(student.tanggal_lahir)}
                 </span>
               </div>
               <div>
@@ -373,10 +471,16 @@ export const ParentDashboard: React.FC<ParentDashboardProps> = ({ student, onNav
                           )}
                         </div>
                         <div className="text-slate-400 line-through truncate">
-                          Lama: {diff.old_value || '(Kosong)'}
+                          Lama:{' '}
+                          {isDateFieldKey(fieldKey)
+                            ? formatDateLongID(diff.old_value)
+                            : diff.old_value || '(Kosong)'}
                         </div>
                         <div className="text-blue-900 font-semibold truncate">
-                          Baru: {diff.new_value}
+                          Baru:{' '}
+                          {isDateFieldKey(fieldKey)
+                            ? formatDateLongID(diff.new_value)
+                            : diff.new_value}
                         </div>
                       </div>
                     ))}

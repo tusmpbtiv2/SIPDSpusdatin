@@ -20,7 +20,8 @@ import {
   Sparkles,
   CheckCircle2
 } from 'lucide-react';
-import { formatDateDMY, mapIncomeToRange } from '../../utils/formatters';
+import { formatDateDMY, formatDateLongID, isDateFieldKey, mapIncomeToRange } from '../../utils/formatters';
+import { DateInputDMY } from '../../components/common/DateInputDMY';
 
 interface PerbaikiBiodataPageProps {
   student: Siswa;
@@ -47,6 +48,9 @@ export const PerbaikiBiodataPage: React.FC<PerbaikiBiodataPageProps> = ({
       const val = student[f.key];
       if (f.key.startsWith('penghasilan_')) {
         map[f.key] = mapIncomeToRange(val);
+      } else if (f.inputType === 'date') {
+        const dmy = formatDateDMY(val);
+        map[f.key] = dmy !== '-' ? dmy : '';
       } else {
         map[f.key] = val !== undefined && val !== null ? String(val) : '';
       }
@@ -250,7 +254,11 @@ export const PerbaikiBiodataPage: React.FC<PerbaikiBiodataPageProps> = ({
                       Data Lama (Saat Ini di Buku Induk)
                     </span>
                     <span className="font-medium break-words">
-                      {item.old_value === '-' ? 'Kosong (Belum Diisi)' : item.old_value}
+                      {item.old_value === '-'
+                        ? 'Kosong (Belum Diisi)'
+                        : isDateFieldKey(fieldKey)
+                        ? `${formatDateLongID(item.old_value)} (${item.old_value})`
+                        : item.old_value}
                     </span>
                   </div>
 
@@ -262,7 +270,11 @@ export const PerbaikiBiodataPage: React.FC<PerbaikiBiodataPageProps> = ({
                     <span className="text-[10px] uppercase font-bold text-emerald-600 block mb-0.5">
                       Data Baru (Usulan Orang Tua)
                     </span>
-                    <span className="font-bold break-words">{item.new_value}</span>
+                    <span className="font-bold break-words">
+                      {isDateFieldKey(fieldKey)
+                        ? `${formatDateLongID(item.new_value)} (${item.new_value})`
+                        : item.new_value}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -444,9 +456,16 @@ export const PerbaikiBiodataPage: React.FC<PerbaikiBiodataPageProps> = ({
                         placeholder={`Isi ${field.label}...`}
                         className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md text-xs text-slate-900 bg-white"
                       />
+                    ) : field.inputType === 'date' ? (
+                      <DateInputDMY
+                        value={currentVal}
+                        onChange={val =>
+                          setFormValues(prev => ({ ...prev, [field.key]: val }))
+                        }
+                      />
                     ) : (
                       <input
-                        type={field.inputType === 'date' ? 'date' : 'text'}
+                        type="text"
                         value={currentVal}
                         onChange={e =>
                           setFormValues(prev => ({ ...prev, [field.key]: e.target.value }))
@@ -457,7 +476,14 @@ export const PerbaikiBiodataPage: React.FC<PerbaikiBiodataPageProps> = ({
                     )}
 
                     <div className="mt-1 text-[10px] text-slate-400 truncate">
-                      Data lama: <span className="font-mono text-slate-600">{oldVal || 'Kosong'}</span>
+                      Data lama:{' '}
+                      <span className="font-semibold text-slate-600">
+                        {!oldVal
+                          ? 'Kosong'
+                          : field.inputType === 'date' || isDateFieldKey(String(field.key))
+                          ? `${formatDateLongID(oldVal)} (${oldVal})`
+                          : oldVal}
+                      </span>
                     </div>
                   </div>
                 );

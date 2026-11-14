@@ -207,6 +207,50 @@ export interface PerubahanBiodata {
   catatan_verifikator?: string;
   submitted_at: string;
   verified_at?: string;
+  event_id?: string;
+  event_name?: string;
+}
+
+export type StudentConfirmationStatus =
+  | 'belum_konfirmasi'
+  | 'confirmed_valid'
+  | 'submitted_correction'
+  | 'correction_approved';
+
+export interface DataConfirmationEvent {
+  id: string;
+  nama_periode: string;
+  tahun_ajaran: string;
+  deskripsi?: string;
+  tanggal_mulai: string;
+  tanggal_selesai: string;
+  target_classes: string[]; // kosong = semua kelas, atau array seperti ['7A', '7B']
+  target_columns: string[]; // daftar key dari ALL_59_STUDENT_FIELDS
+  is_active: boolean;
+  created_by_name?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface StudentDataConfirmationRecord {
+  id: string;
+  event_id: string;
+  event_name: string;
+  siswa_id: string;
+  nis?: string;
+  nisn: string;
+  nama_siswa: string;
+  kelas: string;
+  nama_wali: string;
+  hubungan_wali?: string;
+  no_hp_wali?: string;
+  status: 'confirmed_valid' | 'submitted_correction' | 'correction_approved';
+  catatan_wali?: string;
+  change_request_id?: string;
+  confirmed_columns_snapshot?: Record<string, string>;
+  confirmed_at: string;
+  verified_at?: string;
+  verified_by_name?: string;
 }
 
 export type ImportCategory =

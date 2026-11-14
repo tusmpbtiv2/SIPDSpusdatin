@@ -39,9 +39,11 @@ import { ExportExcelPage } from './pages/admin/ExportExcelPage';
 import { AkunOrangTuaPage } from './pages/admin/AkunOrangTuaPage';
 import { PengaturanPage } from './pages/admin/PengaturanPage';
 import { AuditLogPage } from './pages/admin/AuditLogPage';
+import { KonfirmasiDataPage } from './pages/admin/KonfirmasiDataPage';
 
 // Parent Pages
 import { ParentDashboard } from './pages/parent/ParentDashboard';
+import { KonfirmasiDataParentPage } from './pages/parent/KonfirmasiDataParentPage';
 import { BiodataAnakPage } from './pages/parent/BiodataAnakPage';
 import { PerbaikiBiodataPage } from './pages/parent/PerbaikiBiodataPage';
 import { PengajuanSayaPage } from './pages/parent/PengajuanSayaPage';
@@ -161,6 +163,8 @@ export default function App() {
           return <ArsipAlumniPage />;
         case 'backup-database':
           return <BackupDatabasePage />;
+        case 'konfirmasi-data':
+          return <KonfirmasiDataPage />;
         case 'verifikasi-perubahan':
           return <VerifikasiPerubahanPage />;
         case 'mutasi-masuk':
@@ -223,6 +227,17 @@ export default function App() {
       switch (parentMenu) {
         case 'parent-dashboard':
           return <ParentDashboard student={linkedStudent} onNavigate={setParentMenu} />;
+        case 'konfirmasi-data-parent':
+          return (
+            <KonfirmasiDataParentPage
+              student={linkedStudent}
+              onRefreshStudent={() => {
+                getSiswaByNisn(linkedStudent.nisn).then(s => {
+                  if (s) setLinkedStudent(s);
+                });
+              }}
+            />
+          );
         case 'biodata-anak':
           return (
             <BiodataAnakPage
